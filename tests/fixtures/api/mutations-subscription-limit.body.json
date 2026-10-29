@@ -1,0 +1,9 @@
+{
+  "results": [
+    {
+      "mid": "m-0014-subscribe",
+      "status": "rejected",
+      "error": "subscription_limit"
+    }
+  ]
+}

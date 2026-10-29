@@ -1,0 +1,17 @@
+[package]
+name = "tela-content"
+description = "正文对象块模型、译文对照与统一内容 API 层"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tela-proto.workspace = true
+tela-net.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+urlencoding.workspace = true

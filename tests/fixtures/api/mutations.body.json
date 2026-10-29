@@ -1,0 +1,57 @@
+{
+  "results": [
+    {
+      "mid": "m-0001-subscribe",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0002-subscribe",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0003-subscribe",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0004-folder",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0005-file",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0006-pref",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0007-like",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0008-read",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0009-highlight",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0010-recommend",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0011-follow",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0012-language",
+      "status": "applied"
+    },
+    {
+      "mid": "m-0013-unknown",
+      "status": "rejected",
+      "error": "invalid"
+    }
+  ]
+}

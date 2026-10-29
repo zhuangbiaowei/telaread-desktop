@@ -1,0 +1,19 @@
+[package]
+name = "tela-sync"
+description = "同步编排：cursor 推进、reset 重建、more 续拉、推送批量与幂等"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tela-proto.workspace = true
+tela-store.workspace = true
+tela-net.workspace = true
+
+[dev-dependencies]
+# 端到端用例要断言「断点续跑」跨进程边界：落盘库 + 重新 open 同一路径。
+tempfile = "3"

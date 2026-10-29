@@ -1,0 +1,29 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/mutations",
+    "body": {
+      "mutations": [
+        {
+          "mid": "m-0014-subscribe",
+          "at": 1790596800000,
+          "type": "subscribe",
+          "feedId": 5
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "no-store"
+  },
+  "body": {
+    "results": [
+      {
+        "mid": "m-0014-subscribe",
+        "status": "rejected",
+        "error": "subscription_limit"
+      }
+    ]
+  }
+}

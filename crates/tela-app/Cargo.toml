@@ -1,0 +1,42 @@
+[package]
+name = "tela-app"
+description = "Tela 桌面应用入口（CLI 引导 + 视图装配）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# 两个 bin（终端 / GUI）时，`cargo run -p tela-app` 默认走终端入口。
+default-run = "tela-app"
+
+[lints]
+workspace = true
+
+[features]
+# GUI 入口只在显式开启时构建：默认 workspace 构建不依赖 Wayland / Vulkan 系统库。
+gui = ["tela-ui/gui"]
+
+[[bin]]
+name = "tela-app"
+path = "src/main.rs"
+
+[[bin]]
+name = "tela-gui"
+path = "src/bin/tela-gui.rs"
+required-features = ["gui"]
+
+[dependencies]
+tela-proto.workspace = true
+tela-store.workspace = true
+tela-sync.workspace = true
+tela-net.workspace = true
+tela-content.workspace = true
+tela-ui.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "gui_check"
+required-features = ["gui"]

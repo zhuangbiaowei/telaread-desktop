@@ -1,0 +1,166 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/mutations",
+    "body": {
+      "mutations": [
+        {
+          "mid": "m-0001-subscribe",
+          "at": 1790596740000,
+          "type": "subscribe",
+          "feedId": 1
+        },
+        {
+          "mid": "m-0002-subscribe",
+          "at": 1790596740000,
+          "type": "subscribe",
+          "feedId": 2
+        },
+        {
+          "mid": "m-0003-subscribe",
+          "at": 1790596740000,
+          "type": "subscribe",
+          "feedId": 3
+        },
+        {
+          "mid": "m-0004-folder",
+          "at": 1790596750000,
+          "type": "putFolder",
+          "id": "f-reading",
+          "name": "Reading"
+        },
+        {
+          "mid": "m-0005-file",
+          "at": 1790596750000,
+          "type": "fileFeed",
+          "feedId": 1,
+          "folderId": "f-reading"
+        },
+        {
+          "mid": "m-0006-pref",
+          "at": 1790596760000,
+          "type": "setPref",
+          "key": "reader.hide_read",
+          "value": false
+        },
+        {
+          "mid": "m-0007-like",
+          "at": 1790596770000,
+          "type": "setLiked",
+          "articleId": 101,
+          "liked": true
+        },
+        {
+          "mid": "m-0008-read",
+          "at": 1790596770000,
+          "type": "markRead",
+          "articleId": 102
+        },
+        {
+          "mid": "m-0009-highlight",
+          "at": 1790596780000,
+          "type": "putHighlight",
+          "id": "h-0001-pixels",
+          "articleId": 101,
+          "contentKey": "c0ffee00000000000000000000000101",
+          "side": "original",
+          "lang": null,
+          "leafId": "b3",
+          "start": 4,
+          "end": 10,
+          "quote": "pixels",
+          "prefix": "Fat ",
+          "suffix": " are",
+          "note": "Keep this."
+        },
+        {
+          "mid": "m-0010-recommend",
+          "at": 1790596790000,
+          "type": "recommend",
+          "articleId": 301,
+          "note": null
+        },
+        {
+          "mid": "m-0011-follow",
+          "at": 1790596790000,
+          "type": "follow",
+          "userId": "Bo7rTz2xKq9mVn4cWp6sLy8dFh3gJk5a"
+        },
+        {
+          "mid": "m-0012-language",
+          "at": 1790596795000,
+          "type": "setReadingLanguage",
+          "language": "zh-Hans"
+        },
+        {
+          "mid": "m-0013-unknown",
+          "at": 1790596800000,
+          "type": "setPref",
+          "key": "ui.theme",
+          "value": "dark"
+        }
+      ]
+    }
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "no-store"
+  },
+  "body": {
+    "results": [
+      {
+        "mid": "m-0001-subscribe",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0002-subscribe",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0003-subscribe",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0004-folder",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0005-file",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0006-pref",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0007-like",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0008-read",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0009-highlight",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0010-recommend",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0011-follow",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0012-language",
+        "status": "applied"
+      },
+      {
+        "mid": "m-0013-unknown",
+        "status": "rejected",
+        "error": "invalid"
+      }
+    ]
+  }
+}

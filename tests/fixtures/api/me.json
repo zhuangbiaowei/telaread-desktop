@@ -1,0 +1,17 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/me"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "private, no-store"
+  },
+  "body": {
+    "handle": "ann",
+    "displayName": "Ann Lee",
+    "avatar": null,
+    "readingLanguage": "zh-Hans",
+    "scope": "write"
+  }
+}

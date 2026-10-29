@@ -1,0 +1,41 @@
+{
+  "format": 1,
+  "norm": 7,
+  "key": "11111111111111111111111111111111",
+  "lang": "en",
+  "blocks": [
+    {
+      "tag": "h1",
+      "html": "<h1 data-tb=\"b1\">Hello Tela</h1>",
+      "leaves": ["b1"]
+    },
+    {
+      "tag": "p",
+      "html": "<p data-tb=\"b2\">A desktop reader built around <em>blocks</em>.</p>",
+      "leaves": ["b2"]
+    },
+    {
+      "tag": "figure",
+      "html": "<figure><img src=\"https://cdn.example.com/cover.png\" alt=\"cover\"></figure>",
+      "leaves": []
+    },
+    {
+      "tag": "pre",
+      "html": "<pre data-tb=\"b3\"><code class=\"language-rust\">fn main() { println!(\"hi\"); }</code></pre>",
+      "leaves": ["b3"]
+    },
+    {
+      "tag": "blockquote",
+      "html": "<blockquote data-tb=\"b4\"><p>Reading is a conversation.</p></blockquote>",
+      "leaves": ["b4"]
+    }
+  ],
+  "leaves": {
+    "b1": { "hash": "h-b1", "chars": 10 },
+    "b2": { "hash": "h-b2", "chars": 40 },
+    "b3": { "hash": "h-b3", "chars": 31, "skip": true },
+    "b4": { "hash": "h-b4", "chars": 25 }
+  },
+  "images": ["cover.png"],
+  "stats": { "chars": 106, "words": 18, "minutes": 3 }
+}

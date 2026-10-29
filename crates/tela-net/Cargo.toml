@@ -1,0 +1,20 @@
+[package]
+name = "tela-net"
+description = "真实 Tela API 的 HTTP 客户端、OAuth PKCE 认证与令牌存储"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tela-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+keyring.workspace = true
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true

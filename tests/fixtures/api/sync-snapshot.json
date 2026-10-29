@@ -1,0 +1,308 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/sync?lang=zh-Hans"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "private, no-store"
+  },
+  "body": {
+    "cursor": "eyJ2IjoxLCJzIjoyMCwibCI6InpoLUhhbnMiLCJ0IjpbInByb2ZpbGUiLCJwcmVmcyIsInN1YnNjcmlwdGlvbnMiLCJmZWVkcyIsInNpdGVzIiwiYXJ0aWNsZXMiLCJ0aXRsZXMiLCJzdGF0ZXMiLCJyZWNvbW1lbmRhdGlvbnMiLCJoaWdobGlnaHRzIiwidHJhbnNsYXRpb25zIiwiZm9sZGVycyIsImZlZWRGb2xkZXJzIiwiZm9sbG93cyJdfQ",
+    "more": false,
+    "reset": true,
+    "lang": "zh-Hans",
+    "types": [
+      "profile",
+      "prefs",
+      "subscriptions",
+      "feeds",
+      "sites",
+      "articles",
+      "titles",
+      "states",
+      "recommendations",
+      "highlights",
+      "translations",
+      "folders",
+      "feedFolders",
+      "follows"
+    ],
+    "removed": {
+      "articles": []
+    },
+    "rows": {
+      "profile": {
+        "handle": "ann",
+        "displayName": "Ann Lee",
+        "bio": null,
+        "avatar": null,
+        "readingLanguage": "zh-Hans",
+        "publicSubscriptions": false,
+        "publicLikes": false
+      },
+      "prefs": [
+        {
+          "key": "reader.hide_read",
+          "value": false,
+          "updatedAt": 1790596760000
+        }
+      ],
+      "subscriptions": [
+        {
+          "feedId": 1,
+          "watermarkId": 0,
+          "createdAt": 1790596800000,
+          "deletedAt": null
+        },
+        {
+          "feedId": 2,
+          "watermarkId": 0,
+          "createdAt": 1790596800000,
+          "deletedAt": null
+        },
+        {
+          "feedId": 3,
+          "watermarkId": 0,
+          "createdAt": 1790596800000,
+          "deletedAt": null
+        }
+      ],
+      "feeds": [
+        {
+          "id": 1,
+          "siteId": 1,
+          "feedUrl": "https://blog1.example/feed.xml",
+          "title": null,
+          "status": "active",
+          "lastFetchedAt": 1790593200000,
+          "lastItemAt": 1790589600000
+        },
+        {
+          "id": 2,
+          "siteId": 2,
+          "feedUrl": "https://blog2.example/feed.xml",
+          "title": null,
+          "status": "active",
+          "lastFetchedAt": 1790593200000,
+          "lastItemAt": 1790589600000
+        },
+        {
+          "id": 3,
+          "siteId": 3,
+          "feedUrl": "https://blog3.example/feed.xml",
+          "title": null,
+          "status": "active",
+          "lastFetchedAt": 1790593200000,
+          "lastItemAt": 1790589600000
+        }
+      ],
+      "sites": [
+        {
+          "id": 1,
+          "homeUrl": "https://blog1.example",
+          "title": "Ink & Pixels",
+          "description": "Notes on type and the screen.",
+          "faviconUrl": "https://assets.telaread.com/favicons/1.png",
+          "primaryLang": "en",
+          "readerCount": 0,
+          "translationAllowed": true,
+          "claimed": false
+        },
+        {
+          "id": 2,
+          "homeUrl": "https://blog2.example",
+          "title": "Quiet Notes",
+          "description": "A writer who asked not to be translated.",
+          "faviconUrl": null,
+          "primaryLang": "en",
+          "readerCount": 0,
+          "translationAllowed": false,
+          "claimed": false
+        },
+        {
+          "id": 3,
+          "homeUrl": "https://blog3.example",
+          "title": "慢读",
+          "description": "读得慢一点。",
+          "faviconUrl": null,
+          "primaryLang": "zh-Hans",
+          "readerCount": 0,
+          "translationAllowed": true,
+          "claimed": false
+        }
+      ],
+      "articles": [
+        {
+          "id": 101,
+          "feedId": 1,
+          "url": "https://blog1.example/posts/101",
+          "title": "Drawing with pixels",
+          "author": "A. Writer",
+          "publishedAt": 1790589600000,
+          "fetchedAt": 1790589600000,
+          "sortAt": 1790589600000,
+          "sourceLang": "en",
+          "excerpt": "The opening of “Drawing with pixels”.",
+          "contentKey": "c0ffee00000000000000000000000101",
+          "wordCount": 1200,
+          "readingMinutes": 6,
+          "likeCount": 1,
+          "recommendCount": 1
+        },
+        {
+          "id": 102,
+          "feedId": 1,
+          "url": "https://blog1.example/posts/102",
+          "title": "A grid for every page",
+          "author": "A. Writer",
+          "publishedAt": 1790510400000,
+          "fetchedAt": 1790510400000,
+          "sortAt": 1790510400000,
+          "sourceLang": "en",
+          "excerpt": "The opening of “A grid for every page”.",
+          "contentKey": "c0ffee00000000000000000000000102",
+          "wordCount": 1200,
+          "readingMinutes": 6,
+          "likeCount": 0,
+          "recommendCount": 0
+        },
+        {
+          "id": 201,
+          "feedId": 2,
+          "url": "https://blog2.example/posts/201",
+          "title": "Silence, kept",
+          "author": "A. Writer",
+          "publishedAt": 1790586000000,
+          "fetchedAt": 1790586000000,
+          "sortAt": 1790586000000,
+          "sourceLang": "en",
+          "excerpt": "The opening of “Silence, kept”.",
+          "contentKey": "c0ffee00000000000000000000000201",
+          "wordCount": 1200,
+          "readingMinutes": 6,
+          "likeCount": 0,
+          "recommendCount": 0
+        },
+        {
+          "id": 301,
+          "feedId": 3,
+          "url": "https://blog3.example/posts/301",
+          "title": "一个人的书店",
+          "author": "A. Writer",
+          "publishedAt": 1790578800000,
+          "fetchedAt": 1790578800000,
+          "sortAt": 1790578800000,
+          "sourceLang": "zh-Hans",
+          "excerpt": "城里最小的书店。",
+          "contentKey": "c0ffee00000000000000000000000301",
+          "wordCount": 1200,
+          "readingMinutes": 6,
+          "likeCount": 1,
+          "recommendCount": 1
+        }
+      ],
+      "titles": [
+        {
+          "articleId": 101,
+          "lang": "zh-Hans",
+          "title": "用像素作画",
+          "excerpt": "关于像素的开头。"
+        },
+        {
+          "articleId": 102,
+          "lang": "zh-Hans",
+          "title": "每一页的网格",
+          "excerpt": null
+        }
+      ],
+      "states": [
+        {
+          "articleId": 101,
+          "readAt": 1790596770000,
+          "markedUnread": false,
+          "likedAt": 1790596770000
+        },
+        {
+          "articleId": 102,
+          "readAt": 1790596770000,
+          "markedUnread": false,
+          "likedAt": null
+        }
+      ],
+      "recommendations": [
+        {
+          "articleId": 301,
+          "note": null,
+          "createdAt": 1790596790000,
+          "deletedAt": null
+        }
+      ],
+      "highlights": [
+        {
+          "id": "h-0001-pixels",
+          "articleId": 101,
+          "contentKey": "c0ffee00000000000000000000000101",
+          "side": "original",
+          "lang": null,
+          "leafId": "b3",
+          "start": 4,
+          "end": 10,
+          "quote": "pixels",
+          "prefix": "Fat ",
+          "suffix": " are",
+          "note": "Keep this.",
+          "createdAt": 1790596780000,
+          "updatedAt": 1790596780000,
+          "deletedAt": null
+        }
+      ],
+      "translations": [
+        {
+          "contentKey": "c0ffee00000000000000000000000101",
+          "lang": "zh-Hans",
+          "state": "done",
+          "chunks": [
+            "/o/tc/c0ffee00000000000000000000000101/zh-Hans/r1/0.json"
+          ],
+          "object": "/o/t/c0ffee00000000000000000000000101/zh-Hans/5e1f2a.json",
+          "dueAt": null
+        },
+        {
+          "contentKey": "c0ffee00000000000000000000000102",
+          "lang": "zh-Hans",
+          "state": "waiting",
+          "chunks": [],
+          "object": null,
+          "dueAt": 1790618400000
+        }
+      ],
+      "folders": [
+        {
+          "id": "f-reading",
+          "name": "Reading",
+          "createdAt": 1790596750000,
+          "updatedAt": 1790596750000,
+          "deletedAt": null
+        }
+      ],
+      "feedFolders": [
+        {
+          "feedId": 1,
+          "folderId": "f-reading",
+          "updatedAt": 1790596750000
+        }
+      ],
+      "follows": [
+        {
+          "userId": "Bo7rTz2xKq9mVn4cWp6sLy8dFh3gJk5a",
+          "handle": "bo_reads",
+          "displayName": "Bo",
+          "avatar": "https://telaread.com/avatar/Bo7rTz2xKq9mVn4cWp6sLy8dFh3gJk5a?v=0",
+          "createdAt": 1790596790000,
+          "deletedAt": null
+        }
+      ]
+    }
+  }
+}

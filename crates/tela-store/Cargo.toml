@@ -1,0 +1,22 @@
+[package]
+name = "tela-store"
+description = "SQLite schema/迁移/apply_pull/待发队列与本地查询"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tela-proto.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# 迁移/重开库/断电模拟都用临时目录（docs/architecture.md §测试策略）。
+tempfile = "3"
+# 迁移测试要手写 v1 旧库。
+rusqlite.workspace = true

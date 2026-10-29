@@ -1,0 +1,81 @@
+# Tela Desktop workspace
+#
+# 依据：docs/development_plan.md §4「目录与路径契约」、§5「模块划分」、
+#       docs/architecture.md §3.1「版本锁定」。
+#
+# 注意：gpui-kit 对 gpui-pre 的依赖是精确版本（=0.3.9），不要手动 `cargo update`
+# 到更新的 gpui-pre，否则组件层可能编译不过（见 docs/architecture.md §3.1 注）。
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# --- 内部 crate（依赖方向单向：app → {ui, sync} → {store, content, net} → proto）---
+tela-proto = { path = "crates/tela-proto" }
+tela-store = { path = "crates/tela-store" }
+tela-sync = { path = "crates/tela-sync" }
+tela-net = { path = "crates/tela-net" }
+tela-content = { path = "crates/tela-content" }
+tela-ui = { path = "crates/tela-ui" }
+
+# --- 外部依赖（docs/architecture.md §3.1；M0 只启用已落地的部分）---
+# M0 启用：CLI 解析。
+clap = { version = "4", features = ["derive"] }
+# M0 声明、M1（wire 类型/错误类型）起使用。
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v7"] }
+# M2 起（tela-ui）：GUI 依赖需要 libxkbcommon/vulkan 等系统库。
+gpui-kit = "0.8.0"
+# M1 起（tela-store）：
+rusqlite = { version = "0.41", features = ["bundled", "backup", "functions"] }
+im = "15"
+# M1/M2 起（tela-net）：
+# 真实 API 只走 https，桌面端用阻塞调用（GUI 放到后台线程），因此用 blocking + rustls：
+# 不依赖系统 OpenSSL，三平台行为一致。
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "http2",
+    "json",
+    "form",
+    "charset",
+    "gzip",
+    "blocking",
+] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+# 刷新令牌必须进系统凭据库（macOS Keychain / Windows Credential Manager /
+# Linux Secret Service），不能落普通文件（docs/api/authorization.md「Keeping tokens」）。
+keyring = { version = "3.6", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
+# OAuth PKCE：S256 challenge、base64url 编码与随机数。
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+# 查询串编码（cursor 是不透明字符串，必须完整百分号编码）。
+urlencoding = "2"
+# M2/M3 起（tela-content）：
+scraper = "0.29"
+image = "0.25"
+# 贯穿各里程碑：
+tracing = "0.1"
+anyhow = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

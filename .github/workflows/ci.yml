@@ -1,0 +1,111 @@
+# CI：与本地实际命令逐条一致（docs/development_plan.md §9）。
+#
+# 本地复现（Linux + bash，已验证工具链 rustc/cargo 1.98.1、rustfmt 1.9.0、clippy 0.1.98）：
+#   cargo fmt --all --check
+#   cargo clippy --workspace --all-targets -- -D warnings
+#   cargo build --workspace --locked
+#   cargo test --workspace --locked
+#   cargo run -p tela-app -- --version
+#   env -u DISPLAY -u WAYLAND_DISPLAY cargo test -p tela-ui --features gui-test --locked
+#   cargo build -p tela-app --features gui --bin tela-gui --locked
+#
+# 说明：
+# - toolchain 用 stable（当前解析到 1.98.1）；workspace 的 rust-version = 1.92 是最低支持版本，
+#   不是最高版本，因此 CI 用 stable 不会与本地产生行为差。
+# - `--locked` 保证 Cargo.lock 与清单一致，避免 CI 悄悄升级依赖（对应 architecture.md §3.1 版本锁定）。
+# - GUI 测试用 GPUI 的 test-support 无头运行（本机实测去掉 DISPLAY/WAYLAND_DISPLAY 也通过），
+#   因此 GUI job 不需要 Xvfb；但编译 gpui-kit 仍要装 Linux 头文件（见 gui job）。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: fmt + clippy + build + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Show toolchain (避免版本漂移后无法归因)
+        run: cargo --version && rustc --version && cargo clippy --version && rustfmt --version
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: CLI entry smoke (M0 验收第 4 条)
+        run: cargo run -p tela-app --locked -- --version
+
+  gui:
+    name: gui (gpui-kit, headless tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # 与默认 job 分开缓存：GUI 依赖图大，避免互相挤掉。
+          key: gui
+
+      # gpui-kit 官方在 Ubuntu 24.04 验证过的依赖（见上游 installation.md）；
+      # 额外加 libvulkan-dev / mesa-vulkan-drivers 覆盖 WGPU 的编译与后续截图测试。
+      - name: Install GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang cmake libfontconfig1-dev libwayland-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev libvulkan-dev libvulkan1 mesa-vulkan-drivers \
+            fonts-noto-cjk
+
+      - name: GUI tests (headless; no DISPLAY needed)
+        run: env -u DISPLAY -u WAYLAND_DISPLAY cargo test -p tela-ui --features gui-test --locked
+
+      - name: GUI app tests (assembly + --check)
+        run: cargo test -p tela-app --features gui --locked
+
+      - name: GUI clippy
+        run: |
+          cargo clippy -p tela-app --features gui --all-targets -- -D warnings
+          cargo clippy -p tela-ui --features gui-test --all-targets -- -D warnings
+
+      - name: Build tela-gui
+        run: cargo build -p tela-app --features gui --bin tela-gui --locked
+
+      - name: tela-gui data-path smoke (no window)
+        run: |
+          TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
+            cargo run -p tela-app --features gui --bin tela-gui --locked -- --check

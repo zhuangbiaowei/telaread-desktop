@@ -1,0 +1,58 @@
+[package]
+name = "tela-ui"
+description = "视图层：三栏列表、阅读视图、翻译对照、主题与设置"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# GUI 组件层（gpui-kit）在 M2 接入：需要 libxkbcommon / vulkan 等系统库与图形会话。
+# 默认不启用，保证 `cargo build --workspace` 在无 GUI 系统库的机器上可复现。
+gui = ["dep:gpui-kit"]
+# GUI 测试单独开一条 feature：只有它才把 GPUI 的 test-support 拉进来，
+# 避免默认 `cargo test --workspace` 因为测试依赖而被迫编译整套 GUI。
+#
+# 注意：这里直接依赖 `gpui-pre` 而不是启用 `gpui-kit/test-support`。
+# gpui-kit 0.8.0 的 `test-support` 会引用可选的 `gpui-fast?/test-support` /
+# `gpui-fast-platform?/test-support`，Cargo 解析时会把 gpui-fast 一并拉进
+# 依赖图，而 gpui-fast 0.1.10 与 gpui-pre 0.3.9 对 cocoa / unicode-properties
+# 的精确版本要求互斥（已实测：解析失败）。GPUI 自身的 test-support 不依赖
+# gpui-fast，足以提供 #[gpui::test] 与 TestAppContext；元素级查询由
+# `shell` 纯视图模型测试 + headless 截图补足（Q-13 已解）。
+gui-test = ["gui", "dep:gpui", "dep:gpui-platform"]
+
+[[test]]
+name = "gui_smoke"
+required-features = ["gui-test"]
+
+[[test]]
+name = "gui_shell"
+required-features = ["gui-test"]
+
+[[test]]
+name = "gui_account"
+required-features = ["gui-test"]
+
+[[test]]
+name = "gui_reader"
+required-features = ["gui-test"]
+
+[[test]]
+name = "gui_screenshot"
+required-features = ["gui-test"]
+
+[dependencies]
+tela-proto.workspace = true
+tela-store.workspace = true
+tela-content.workspace = true
+tela-sync.workspace = true
+gpui-kit = { workspace = true, optional = true }
+# 仅 GUI 测试使用：GPUI 自带的 TestAppContext / #[gpui::test]。
+# 依赖键写成 `gpui`，与上游 lib target 名一致，宏展开里的 `gpui::` 路径才能解析。
+gpui = { package = "gpui-pre", version = "=0.3.9", optional = true, features = ["test-support"] }
+# 截图测试需要平台层的 headless renderer（WGPU）；只在 gui-test 下启用。
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", optional = true, features = ["test-support"] }

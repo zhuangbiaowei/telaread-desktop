@@ -1,0 +1,76 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/sync?lang=zh-Hans&cursor=eyJ2IjoxLCJzIjoyMCwibCI6InpoLUhhbnMiLCJ0IjpbInByb2ZpbGUiLCJwcmVmcyIsInN1YnNjcmlwdGlvbnMiLCJmZWVkcyIsInNpdGVzIiwiYXJ0aWNsZXMiLCJ0aXRsZXMiLCJzdGF0ZXMiLCJyZWNvbW1lbmRhdGlvbnMiLCJoaWdobGlnaHRzIiwidHJhbnNsYXRpb25zIiwiZm9sZGVycyIsImZlZWRGb2xkZXJzIiwiZm9sbG93cyJdfQ"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "private, no-store"
+  },
+  "body": {
+    "cursor": "eyJ2IjoxLCJzIjoyMiwibCI6InpoLUhhbnMiLCJ0IjpbInByb2ZpbGUiLCJwcmVmcyIsInN1YnNjcmlwdGlvbnMiLCJmZWVkcyIsInNpdGVzIiwiYXJ0aWNsZXMiLCJ0aXRsZXMiLCJzdGF0ZXMiLCJyZWNvbW1lbmRhdGlvbnMiLCJoaWdobGlnaHRzIiwidHJhbnNsYXRpb25zIiwiZm9sZGVycyIsImZlZWRGb2xkZXJzIiwiZm9sbG93cyJdfQ",
+    "more": false,
+    "reset": false,
+    "lang": "zh-Hans",
+    "types": [
+      "profile",
+      "prefs",
+      "subscriptions",
+      "feeds",
+      "sites",
+      "articles",
+      "titles",
+      "states",
+      "recommendations",
+      "highlights",
+      "translations",
+      "folders",
+      "feedFolders",
+      "follows"
+    ],
+    "removed": {
+      "articles": []
+    },
+    "rows": {
+      "profile": null,
+      "prefs": [],
+      "subscriptions": [],
+      "feeds": [],
+      "sites": [],
+      "articles": [
+        {
+          "id": 103,
+          "feedId": 1,
+          "url": "https://blog1.example/posts/103",
+          "title": "Kerning, slowly",
+          "author": "A. Writer",
+          "publishedAt": 1790596200000,
+          "fetchedAt": 1790596200000,
+          "sortAt": 1790596200000,
+          "sourceLang": "en",
+          "excerpt": "The opening of “Kerning, slowly”.",
+          "contentKey": "c0ffee00000000000000000000000103",
+          "wordCount": 1200,
+          "readingMinutes": 6,
+          "likeCount": 0,
+          "recommendCount": 0
+        }
+      ],
+      "titles": [
+        {
+          "articleId": 103,
+          "lang": "zh-Hans",
+          "title": "慢慢调字距",
+          "excerpt": null
+        }
+      ],
+      "states": [],
+      "recommendations": [],
+      "highlights": [],
+      "translations": [],
+      "folders": [],
+      "feedFolders": [],
+      "follows": []
+    }
+  }
+}

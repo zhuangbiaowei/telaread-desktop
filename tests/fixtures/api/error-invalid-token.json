@@ -1,0 +1,14 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/me"
+  },
+  "status": 401,
+  "headers": {
+    "cache-control": "no-store",
+    "www-authenticate": "Bearer realm=\"tela\", error=\"invalid_token\""
+  },
+  "body": {
+    "error": "invalid_token"
+  }
+}

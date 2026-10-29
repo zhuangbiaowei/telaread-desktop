@@ -1,0 +1,26 @@
+# 上游源码只读副本（不参与构建）
+/.reference/
+
+# Rust
+/target/
+**/*.rs.bk
+
+# 本地数据与构建产物
+/dist/
+*.log
+.DS_Store
+
+# 本地抓取的 API 文档 / 临时 CARGO_HOME / 冒烟库
+/tmp/
+
+# 本仓库内稳定的本地数据目录（TELA_DB 指向这里）
+/.local/
+
+# 代理/沙箱工作区与本地补丁（不属于源码）
+/.smart_box/
+/.smart_expert/
+
+# 本地 SQLite 数据库（真实数据在 .local/ 或用户 XDG 目录）
+*.db
+*.db-wal
+*.db-shm

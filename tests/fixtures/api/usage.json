@@ -1,0 +1,36 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/v1/usage"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "private, no-store"
+  },
+  "body": {
+    "translations": {
+      "perDay": 20,
+      "usedToday": 0,
+      "waiting": 0,
+      "resetsAt": 1790640000000
+    },
+    "feeds": {
+      "perDay": 20,
+      "addedToday": 0,
+      "pending": 0
+    },
+    "subscriptions": {
+      "max": 300,
+      "count": 3
+    },
+    "posts": {
+      "perDay": 100,
+      "openedToday": 0,
+      "resetsAt": 1790640000000
+    },
+    "rateLimits": {
+      "perMemberPerMinute": 120,
+      "perAppPerMinute": 6000
+    }
+  }
+}

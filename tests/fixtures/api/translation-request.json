@@ -1,0 +1,25 @@
+{
+  "request": {
+    "method": "POST",
+    "path": "/v1/translations",
+    "body": {
+      "articleId": 401,
+      "lang": "zh-Hans"
+    }
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "private, no-store"
+  },
+  "body": {
+    "status": "running",
+    "translation": {
+      "contentKey": "c0ffee00000000000000000000000401",
+      "lang": "zh-Hans",
+      "state": "requested",
+      "chunks": [],
+      "object": null,
+      "dueAt": null
+    }
+  }
+}

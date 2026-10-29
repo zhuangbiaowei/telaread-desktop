@@ -1,0 +1,57 @@
+{
+  "request": {
+    "method": "GET",
+    "path": "/meta"
+  },
+  "status": 200,
+  "headers": {
+    "cache-control": "public, max-age=300"
+  },
+  "body": {
+    "api": "tela",
+    "current": 1,
+    "oldest": 1,
+    "versions": [
+      {
+        "version": 1,
+        "status": "preview",
+        "sunsetAt": null
+      }
+    ],
+    "features": {
+      "v1": [
+        "sync",
+        "mutations",
+        "bodies",
+        "translations",
+        "feeds",
+        "discover",
+        "sites",
+        "profiles",
+        "blogrolls",
+        "search",
+        "articles"
+      ]
+    },
+    "limits": {
+      "pushMutations": 50,
+      "pushBytes": 1048576,
+      "pageRows": 1000,
+      "bodiesPerRequest": 25,
+      "horizonDays": 30,
+      "readingLanguages": [
+        "zh-Hans",
+        "zh-Hant",
+        "en",
+        "fr"
+      ],
+      "translationsPerDay": 20,
+      "feedsPerDay": 20,
+      "maxSubscriptions": 300,
+      "unsubscribedPostsPerDay": 100
+    },
+    "oauth": {
+      "metadata": "https://api.telaread.com/.well-known/oauth-authorization-server"
+    }
+  }
+}
