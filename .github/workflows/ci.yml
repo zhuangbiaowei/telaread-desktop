@@ -44,6 +44,12 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
+      # keyring 的 Linux Secret Service 后端需要 dbus-1.pc；aws-lc-rs 需要 cmake/clang。
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config cmake clang
+
       - name: Show toolchain (避免版本漂移后无法归因)
         run: cargo --version && rustc --version && cargo clippy --version && rustfmt --version
 
@@ -86,8 +92,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc g++ clang cmake libfontconfig1-dev libwayland-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            gcc g++ clang cmake pkg-config libdbus-1-dev libfontconfig1-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libssl-dev libzstd-dev libvulkan-dev libvulkan1 mesa-vulkan-drivers \
             fonts-noto-cjk
 
