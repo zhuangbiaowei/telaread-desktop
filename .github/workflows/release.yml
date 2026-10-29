@@ -1,0 +1,180 @@
+# 版本发布：推送 v* tag 时触发。
+#
+# 流程：
+#   1. verify：校验 tag 与 Cargo 版本一致，并在 Linux 上跑完整测试；
+#   2. build：ubuntu-24.04 + windows-latest 原生构建 tela-app / tela-gui；
+#   3. release：汇总两个平台的压缩包，创建 GitHub Release。
+#
+# 约定：
+#   - tag 形如 v0.1.0；预发布可用 v0.1.0-rc.1（自动标记 prerelease）；
+#   - tag 去掉前缀 v 与 -rc.N 后必须等于 tela-app 的 Cargo 版本；
+#   - 只有 tag 推送会触发，普通 main 推送仍走 ci.yml。
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  verify:
+    name: verify tag + tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-verify
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config cmake clang
+
+      - name: Check tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            v*) ;;
+            *) echo "release tag must start with v, got ${GITHUB_REF_NAME}" >&2; exit 1 ;;
+          esac
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="tela-app") | .version')"
+          tag_version="${GITHUB_REF_NAME#v}"
+          base_version="${tag_version%%-*}"
+          echo "tag=${GITHUB_REF_NAME} cargo=${version} base=${base_version}"
+          if [ "${version}" != "${base_version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo version ${version}" >&2
+            exit 1
+          fi
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      MATRIX_TARGET: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      # keyring 的 Secret Service 后端需要 dbus-1.pc；gpui-kit / WGPU 需要
+      # Wayland、X11、Vulkan 的头文件与 cmake/clang。
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc g++ clang cmake pkg-config libdbus-1-dev libfontconfig1-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libssl-dev libzstd-dev libvulkan-dev libvulkan1 mesa-vulkan-drivers
+
+      # aws-lc-sys 在 Windows 上可能需要 NASM；已在镜像里时 choco 会直接成功。
+      - name: Ensure NASM (Windows, aws-lc-sys)
+        if: runner.os == 'Windows'
+        run: choco install nasm -y --no-progress
+        shell: pwsh
+
+      - name: Build release binaries (CLI + GUI)
+        run: cargo build --release --locked -p tela-app --features gui --bins
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          cp target/release/tela-app target/release/tela-gui \
+             README.md LICENSE-MIT LICENSE-APACHE dist/package/
+          name="tela-desktop-${GITHUB_REF_NAME}-${MATRIX_TARGET}.tar.gz"
+          tar -C dist/package -czf "dist/${name}" .
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/package | Out-Null
+          Copy-Item target/release/tela-app.exe, target/release/tela-gui.exe, README.md, LICENSE-MIT, LICENSE-APACHE dist/package/
+          $name = "tela-desktop-$env:GITHUB_REF_NAME-$env:MATRIX_TARGET.zip"
+          Compress-Archive -Path dist/package/* -DestinationPath "dist/$name"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "dist/$name.sha256"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: publish GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: dist/*

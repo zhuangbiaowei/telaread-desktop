@@ -138,6 +138,34 @@ TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
 
 更完整的接口映射、错误码与安全说明见 [`docs/real-api.md`](./docs/real-api.md)。
 
+## 发布
+
+发布由 [`release.yml`](./.github/workflows/release.yml) 自动完成：
+
+```bash
+# tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
+git tag -a v0.1.0 -m "Tela Desktop v0.1.0"
+git push origin v0.1.0
+```
+
+推送 tag 后：
+
+1. 在 Linux 上校验 tag/版本并跑完整测试；
+2. 在 `ubuntu-24.04` 与 `windows-latest` 原生构建 `tela-app` 与 `tela-gui`；
+3. 生成 `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz`、
+   `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip` 及对应 `.sha256`；
+4. 创建 GitHub Release（自动生成 release notes）。
+
+预发布用带连字符的 tag，会自动标记为 prerelease：
+
+```bash
+git tag -a v0.1.0-rc.1 -m "Tela Desktop v0.1.0-rc.1"
+git push origin v0.1.0-rc.1
+```
+
+Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建。
+当前不生成 macOS 产物。
+
 ## 文档
 
 | 文档 | 内容 |
