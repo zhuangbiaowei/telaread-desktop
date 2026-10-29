@@ -262,11 +262,21 @@ impl MockContentApi {
 
     /// 消费一次失败注入；返回 `true` 表示本次请求应失败。
     fn consume_injected_failure(&self) -> bool {
-        self.fail_next
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
-                left.checked_sub(1)
-            })
-            .is_ok()
+        // `fetch_update` 在更新的 Rust 上已改名为 `try_update`；用 compare_exchange
+        // 写死语义，既兼容 MSRV 1.92，也不依赖会被重命名/弃用的 API。
+        loop {
+            let left = self.fail_next.load(Ordering::SeqCst);
+            if left == 0 {
+                return false;
+            }
+            if self
+                .fail_next
+                .compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 }
 
