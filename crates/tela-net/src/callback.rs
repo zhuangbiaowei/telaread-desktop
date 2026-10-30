@@ -79,10 +79,58 @@ impl PendingLogin {
                 detail: format!("无法设置监听超时：{err}"),
             })?;
 
-        let mut stream = loop {
+        loop {
+            let mut stream = self.accept_before(deadline)?;
+            // Windows 的 accept 让新 socket 继承监听 socket 的属性（MSDN：新 socket
+            // "has the same properties as socket s"）。listener 是非阻塞的，浏览器
+            // 还没把请求写进来时 read 会立刻 WouldBlock——必须显式改回阻塞，否则
+            // 回调被误判成空请求、端口随即关闭，浏览器看到的就是「127.0.0.1 拒绝连接」。
+            if stream.set_nonblocking(false).is_err() {
+                continue;
+            }
+            match read_request(&mut stream) {
+                // 只有「GET + 回调路径」才是真正的授权回调，交给 validate 严格校验
+                // （state/iss/code 错了要报给用户）。
+                Ok(Some(request)) if self.looks_like_callback(&request) => {
+                    let answer = self.validate(&request);
+                    respond(&mut stream, answer.is_ok());
+                    return answer;
+                }
+                // 浏览器预连接、安全软件探活、TLS 探测、favicon 等：忽略它们，
+                // 继续等真正的回调，不要因此结束登录。
+                Ok(_) | Err(_) => continue,
+            }
+        }
+    }
+
+    /// 请求行是否是本次登录的回调（GET + 配置的回调路径）。
+    fn looks_like_callback(&self, request_line: &str) -> bool {
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().unwrap_or_default();
+        let Some(target) = parts.next() else {
+            return false;
+        };
+        method == "GET"
+            && reqwest::Url::parse(&format!("http://127.0.0.1{target}"))
+                .is_ok_and(|url| url.path() == self.config.redirect_path)
+    }
+
+    /// 在 deadline 之前等下一个连接；超时返回错误。
+    fn accept_before(&self, deadline: Instant) -> Result<TcpStream, TelaError> {
+        loop {
             match self.listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                Ok((stream, _)) => return Ok(stream),
+                // WouldBlock：还没人来。ConnectionReset/Aborted：Windows 上对端在
+                // accept 之前就断开（探活/预连接）会得到 WSAECONNRESET，不是监听
+                // 坏了，跳过继续等。两种情况都只睡眠后重试。
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ) =>
+                {
                     if Instant::now() >= deadline {
                         return Err(TelaError::Auth {
                             ctx: tela_proto::WireContext::new(self.auth_url.clone(), "connect"),
@@ -97,12 +145,7 @@ impl PendingLogin {
                     });
                 }
             }
-        };
-
-        let request = read_request(&mut stream)?;
-        let answer = self.validate(&request);
-        respond(&mut stream, answer.is_ok());
-        answer
+        }
     }
 
     /// 校验请求行里的 query；`error` / `state` / `iss` / `code` 一个都不能错。
@@ -198,7 +241,10 @@ impl PendingLogin {
 }
 
 /// 读一次 HTTP 请求，返回请求行（第一行）。只读到头部结束，够用即可。
-fn read_request(stream: &mut TcpStream) -> Result<String, TelaError> {
+///
+/// 没有收到任何数据（预连接 / 探活 / 对端直接断开）时返回 `Ok(None)`，
+/// 由调用方继续等下一个连接，而不是把整次登录判死。
+fn read_request(stream: &mut TcpStream) -> Result<Option<String>, TelaError> {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let mut buffer = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
@@ -226,17 +272,18 @@ fn read_request(stream: &mut TcpStream) -> Result<String, TelaError> {
         }
     }
     let text = String::from_utf8_lossy(&buffer);
-    text.lines()
+    Ok(text
+        .lines()
         .next()
-        .map(str::to_string)
-        .ok_or_else(|| TelaError::Auth {
-            ctx: tela_proto::WireContext::new("http://127.0.0.1", "connect"),
-            detail: "浏览器回调为空".into(),
-        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string))
 }
 
 /// 无论成功失败都给浏览器一个可读的短页面。
 fn respond(stream: &mut TcpStream, ok: bool) {
+    // 浏览器已经断开时别把等待线程卡死。
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let (title, body) = if ok {
         ("Connected", "You can go back to Tela Desktop now.")
     } else {
@@ -257,4 +304,61 @@ fn respond(stream: &mut TcpStream, ok: bool) {
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    fn state_of(auth_url: &str) -> String {
+        reqwest::Url::parse(auth_url)
+            .expect("合法授权 URL")
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("授权 URL 必须带 state")
+    }
+
+    #[test]
+    fn a_probe_connection_does_not_cancel_the_callback() {
+        let pending = PendingLogin::begin(&AuthConfig::new("tela_app_test")).expect("绑定回环端口");
+        let state = state_of(pending.auth_url());
+        let port = reqwest::Url::parse(pending.redirect_uri())
+            .expect("合法 redirect_uri")
+            .port()
+            .expect("redirect_uri 必须带端口");
+
+        let waiter = std::thread::spawn(move || pending.wait(Duration::from_secs(10)));
+
+        // 浏览器预连接 / 安全软件探活：连上立刻断开，一个字节都不发。
+        drop(TcpStream::connect(("127.0.0.1", port)).expect("连接回环端口"));
+
+        // 另一个 GET，但路径不是回调：也不能把登录判死。
+        let mut favicon = TcpStream::connect(("127.0.0.1", port)).expect("连接回环端口");
+        write!(
+            favicon,
+            "GET /favicon.ico HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        .expect("写探活请求");
+        favicon.flush().expect("flush");
+        drop(favicon);
+
+        // 真正的回调仍然要能完成（旧实现会在这里返回「浏览器回调为空」并关端口）。
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("连接回环端口");
+        write!(
+            stream,
+            "GET /callback?state={state}&iss={ISSUER}&code=code-123 HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\r\n"
+        )
+        .expect("写回调请求");
+        stream.flush().expect("flush");
+
+        let answer = waiter
+            .join()
+            .expect("等待线程不应 panic")
+            .expect("回调应成功");
+        assert_eq!(answer.code, "code-123");
+    }
 }
