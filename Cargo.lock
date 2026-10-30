@@ -6823,7 +6823,7 @@ dependencies = [
 
 [[package]]
 name = "tela-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "serde_json",
@@ -6838,7 +6838,7 @@ dependencies = [
 
 [[package]]
 name = "tela-content"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6849,7 +6849,7 @@ dependencies = [
 
 [[package]]
 name = "tela-net"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "keyring",
@@ -6863,7 +6863,7 @@ dependencies = [
 
 [[package]]
 name = "tela-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6873,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "tela-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6884,7 +6884,7 @@ dependencies = [
 
 [[package]]
 name = "tela-sync"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "tela-net",
  "tela-proto",
@@ -6894,7 +6894,7 @@ dependencies = [
 
 [[package]]
 name = "tela-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
