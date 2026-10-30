@@ -11,7 +11,8 @@ fn check_reports_demo_feeds_articles_and_unread() {
     let db = dir.path().join("tela.db");
 
     let output = Command::new(env!("CARGO_BIN_EXE_tela-gui"))
-        .arg("--check")
+        // 默认真实登录模式；演示装配必须显式 --demo。
+        .args(["--check", "--demo"])
         .env("TELA_DB", &db)
         .env("TELA_DEV_SEED", "1")
         .env("TELA_CONTENT_API", "mock")
@@ -28,7 +29,7 @@ fn check_reports_demo_feeds_articles_and_unread() {
         output.status.code()
     );
     assert!(
-        stdout.contains("feeds=2 articles=4 unread=3"),
+        stdout.contains("mode=demo feeds=2 articles=4 unread=3"),
         "stdout={stdout}\nstderr={stderr}"
     );
     assert!(db.exists(), "check 应真实打开/创建 SQLite 文件");

@@ -293,7 +293,7 @@ impl ShellView {
                 div()
                     .text_xs()
                     .text_color(rgb(WARN))
-                    .child("缺少 TELA_CLIENT_ID：用 scripts/tela-gui-real.sh 启动"),
+                    .child("缺少 TELA_CLIENT_ID：设置环境变量后重启，或用 --demo 进入演示模式"),
             );
         }
         if let Some(error) = &self.account.store_error {

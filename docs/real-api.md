@@ -92,14 +92,14 @@ cargo run -p tela-app -- login --ephemeral    # 刷新令牌只放内存（不�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TELA_CLIENT_ID` | （空） | 注册得到的 `tela_app_…`；`login` 必需 |
+| `TELA_CLIENT_ID` | 构建期内置 | 发布包已内置 `tela_app_…`；本地构建/调试可覆盖 |
 | `TELA_SCOPES` | `write` | 空格分隔；需要邮箱时 `write email` |
 | `TELA_API_BASE_URL` | `https://api.telaread.com` | API 基址（测试可指向本地） |
 | `TELA_AUTH_BASE_URL` | `https://telaread.com` | 授权页站点（`/connect`） |
-| `TELA_DB` | `$XDG_DATA_HOME/tela/tela.db` | SQLite 路径 |
+| `TELA_DB` | `%APPDATA%\tela\tela.db`（Windows）/ `$XDG_DATA_HOME/tela/tela.db` | SQLite 路径 |
 | `TELA_LANG` | `zh-Hans` | 译文语言：`zh-Hans` / `zh-Hant` / `en` / `fr` |
 | `TELA_TOKEN_STORE` | `keyring` | `memory` 只在测试/临时会话使用 |
-| `TELA_DEMO` | （未设置） | GUI 默认 demo；`0` 表示真实 API |
+| `TELA_DEMO` | （未设置） | GUI 默认真实 API（登录模式）；`1`/`true` 进入 demo |
 | `TELA_DEV_SEED` | （未设置） | demo 装配是否写演示数据；`0` 关闭 |
 
 注意：`TELA_CONTENT_API=http` 不再用于「凭空装配」真实后端——真实内容需要登录令牌，

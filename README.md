@@ -42,15 +42,15 @@ cargo run -p tela-app -- demo --chapter mock-long
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `TELA_CLIENT_ID` | （空） | 注册得到的 public client id |
+| `TELA_CLIENT_ID` | 构建期内置 | 发布包已内置 public client id；本地构建/调试可覆盖 |
 | `TELA_SCOPES` | `write` | `read` / `write`，可附加 `email` |
 | `TELA_API_BASE_URL` | `https://api.telaread.com` | API 基址 |
 | `TELA_AUTH_BASE_URL` | `https://telaread.com` | 授权页站点 |
-| `TELA_DB` | `$XDG_DATA_HOME/tela/tela.db` | SQLite 路径 |
+| `TELA_DB` | `%APPDATA%\tela\tela.db`（Windows）/ `$XDG_DATA_HOME/tela/tela.db` | SQLite 路径 |
 | `TELA_LANG` | `zh-Hans` | 译文语言（`zh-Hans` / `zh-Hant` / `en` / `fr`） |
 | `TELA_TOKEN_STORE` | `keyring` | `memory` 仅用于测试/临时会话 |
-| `TELA_DEMO` | （未设置） | GUI 默认 demo；`0` 使用真实 API |
-| `TELA_DEV_SEED` | （未设置） | GUI demo 是否写演示数据；`0` 关闭 |
+| `TELA_DEMO` | （未设置） | GUI 默认真实 API（登录模式）；`1`/`true` 进入 demo |
+| `TELA_DEV_SEED` | （未设置） | demo 是否写演示数据；`0` 关闭 |
 
 ## 构建与测试
 
@@ -60,7 +60,7 @@ cargo run -p tela-app -- demo --chapter mock-long
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.2.0
+cargo run -p tela-app -- --version                        # tela-app 0.3.0
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -79,15 +79,21 @@ GUI 依赖默认**不编译**：`tela-gui` 需要显式 `--features gui`，没�
 仍可跑上面的默认检查。
 
 ```bash
-# 默认：demo 后端 + 空库自动写入 2 个订阅 / 4 篇文章（正常/长章节/无译文/已读）
-TELA_DB=target/tela-gui.db \
-  cargo run -p tela-app --features gui --bin tela-gui --locked
+# 默认：真实 API（登录模式）。未登录时侧栏显示「登录 Tela」，登录后自动同步
+cargo run -p tela-app --features gui --bin tela-gui --locked
 
-# 真实数据：先用 CLI 登录；GUI 在开窗前同步一轮，再读同一份本地库
+# 演示数据（不需要账号）：--demo，空库自动写入 2 个订阅 / 4 篇文章
+TELA_DB=target/tela-gui.db \
+  cargo run -p tela-app --features gui --bin tela-gui --locked -- --demo
+
+# 本地调试真实 API：临时覆盖 client id / 库路径
 source tmp/tela.env                 # 本地 client id / DB 路径（不提交）
-scripts/tela-gui-real.sh            # 等价于 TELA_DEMO=0 + 上述环境
-scripts/tela-gui-real.sh --check    # 无窗口数据冒烟
+cargo run -p tela-app --features gui --bin tela-gui --locked
+scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env + 真实装配）
 ```
+
+发布包在构建时把 public client id 编进二进制（`.github/workflows/release.yml` 用仓库变量
+`TELA_CLIENT_ID` 注入），所以用户解压后默认就是登录模式；`TELA_CLIENT_ID` 环境变量仍可覆盖。
 
 - 左侧订阅、中间文章、右侧阅读面板；关闭最后一个窗口即退出。
 - 侧栏底部是账号面板：未登录时显示「登录 Tela」，等待授权时可「打开授权页 / 复制链接 / 取消」，
@@ -144,8 +150,9 @@ TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
 
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
-git tag -a v0.2.0 -m "Tela Desktop v0.2.0"
-git push origin v0.2.0
+# 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
+git tag -a v0.3.0 -m "Tela Desktop v0.3.0"
+git push origin v0.3.0
 ```
 
 推送 tag 后：
@@ -159,8 +166,8 @@ git push origin v0.2.0
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.2.0-rc.1 -m "Tela Desktop v0.2.0-rc.1"
-git push origin v0.2.0-rc.1
+git tag -a v0.3.0-rc.1 -m "Tela Desktop v0.3.0-rc.1"
+git push origin v0.3.0-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建。
@@ -173,10 +180,14 @@ Windows 的 exe 静态链接 MSVC/C 运行库（见 [`.cargo/config.toml`](./.ca
 Visual C++ Redistributable。`release.yml` 在打包前会扫描两个 exe 的导入表，
 一旦重新引入 `VCRUNTIME140.dll` / `MSVCP140.dll` 就让构建失败。
 
-> **v0.2.0 的 Windows 包没有这个处理**：双击会报
-> `VCRUNTIME140.dll was not found`。临时办法是安装
-> [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)，
-> 或者等下一个 tag（如 v0.2.1）重新发布。
+双击进入的是**登录模式**（发布包内置 public client id）：侧栏底部点「登录 Tela」，
+浏览器完成授权后令牌进 Windows 凭据管理器，数据落在 `%APPDATA%\tela\tela.db`。
+想离线看演示数据时用 `tela-gui.exe --demo`。
+
+> 启动失败时没有控制台输出，原因会写到 `%APPDATA%\tela\tela-gui-error.log`。
+
+> **v0.2.0 的 Windows 包没有静态 CRT**：双击会报
+> `VCRUNTIME140.dll was not found`。请直接用 v0.2.1 及之后的包。
 
 ## 文档
 

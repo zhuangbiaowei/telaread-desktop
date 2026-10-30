@@ -82,6 +82,9 @@ jobs:
     timeout-minutes: 60
     env:
       MATRIX_TARGET: ${{ matrix.target }}
+      # 编译期注入 public client id（见 tela-app 的 DEFAULT_CLIENT_ID）：
+      # 用户解压后直接是登录模式，不需要自己注册 client id。
+      TELA_CLIENT_ID: ${{ vars.TELA_CLIENT_ID }}
     strategy:
       fail-fast: false
       matrix:
@@ -120,8 +123,35 @@ jobs:
         run: choco install nasm -y --no-progress
         shell: pwsh
 
+      # 发布包默认就是登录模式，client id 必须在编译期内置；
+      # 没配仓库变量时直接失败，避免又发一个「只能 demo」的包。
+      - name: Require bundled public client id
+        shell: bash
+        run: |
+          if [ -z "${TELA_CLIENT_ID}" ]; then
+            echo "::error::仓库变量 TELA_CLIENT_ID 未设置：发布包必须内置 public client id，否则用户无法登录。"
+            echo "Settings → Secrets and variables → Actions → Variables 添加 TELA_CLIENT_ID=tela_app_…"
+            exit 1
+          fi
+          echo "bundled client id 前缀：${TELA_CLIENT_ID%%_*}…（长度 ${#TELA_CLIENT_ID}）"
+
       - name: Build release binaries (CLI + GUI)
         run: cargo build --release --locked -p tela-app --features gui --bins
+
+      # 护栏：确认 public client id 真的编进了二进制，否则用户装完只能看到
+      # 「缺少 TELA_CLIENT_ID」，默认登录模式等于没生效。
+      - name: Verify bundled client id is compiled in
+        shell: bash
+        run: |
+          for exe in target/release/tela-app target/release/tela-gui \
+                     target/release/tela-app.exe target/release/tela-gui.exe; do
+            [ -f "$exe" ] || continue
+            if ! grep -a -q "tela_app_" "$exe"; then
+              echo "::error::$exe 不含内置 client id：DEFAULT_CLIENT_ID 没有注入。"
+              exit 1
+            fi
+            echo "OK: $exe 含内置 client id"
+          done
 
       # 回归护栏：v0.2.0 的 Windows 包漏了静态 CRT，用户解压后双击
       # tela-gui.exe 直接报 "VCRUNTIME140.dll was not found"。

@@ -114,4 +114,4 @@ jobs:
       - name: tela-gui data-path smoke (no window)
         run: |
           TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
-            cargo run -p tela-app --features gui --bin tela-gui --locked -- --check
+            cargo run -p tela-app --features gui --bin tela-gui --locked -- --check --demo

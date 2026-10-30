@@ -1,9 +1,9 @@
 # GUI 宿主验收：S0–S4（M2/M3 的 GUI 补课）
 
 > **2026-10-28 更新（R1）**：应用装配层已切到真实 API v1（见 [`real-api.md`](./real-api.md)）。
-> GUI 默认仍是 demo（`TELA_DEMO` 未设置），以保证开箱即用；`TELA_DEMO=0` 时读真实登录后的
-> 本地库。装配层测试文件由 `tests/services.rs` 改名为 `tests/services_v2.rs`，断言口径不变
-> （2 订阅 / 4 文章 / 3 未读）。
+> 2026-10-30 起 GUI **默认真实登录模式**（发布包内置 public client id，`--demo` 或
+> `TELA_DEMO=1` 才进 demo）。装配层测试文件由 `tests/services.rs` 改名为
+> `tests/services_v2.rs`，断言口径不变（2 订阅 / 4 文章 / 3 未读）。
 
 - 验收日期：**2026-10-27**（CST）
 - 计划依据：[`development_plan.md`](./development_plan.md) §9 M2/M3

@@ -55,8 +55,18 @@ pub const ENV_CLIENT_ID: &str = "TELA_CLIENT_ID";
 pub const ENV_SCOPES: &str = "TELA_SCOPES";
 /// 令牌存储：`keyring`（默认）或 `memory`（临时会话）。
 pub const ENV_TOKEN_STORE: &str = "TELA_TOKEN_STORE";
-/// GUI 是否使用真实 API：`0` = 真实，其他/未设置 = demo。
+/// GUI 是否使用真实 API：默认真实（登录模式）；`1`/`true`/`yes`/`on` = demo。
 pub const ENV_DEMO: &str = "TELA_DEMO";
+
+/// 发布包内置的 public client id。
+///
+/// 构建时由同名环境变量注入（`release.yml` 用仓库变量 `vars.TELA_CLIENT_ID`），
+/// 用户解压后直接就是登录模式，不需要自己注册/配置 client id。
+/// public client id 不是秘密；运行时的 `TELA_CLIENT_ID` 仍然优先，便于本地调试。
+pub const DEFAULT_CLIENT_ID: &str = match option_env!("TELA_CLIENT_ID") {
+    Some(value) => value,
+    None => "",
+};
 
 /// 默认译文语言（与 mock fixture 对齐）。
 pub const DEFAULT_LANG: &str = "zh-Hans";
@@ -139,7 +149,9 @@ impl AppConfig {
             auth_base: env_string(ENV_AUTH_BASE_URL)
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| tela_proto::DEFAULT_AUTH_BASE_URL.to_string()),
-            client_id: env_string(ENV_CLIENT_ID).unwrap_or_default(),
+            client_id: env_string(ENV_CLIENT_ID)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_CLIENT_ID.trim().to_string()),
             scopes: env_string(ENV_SCOPES)
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "write".to_string()),
@@ -182,13 +194,27 @@ fn env_string(key: &str) -> Option<String> {
         .map(|value| value.trim().to_string())
 }
 
-/// 默认库路径：`TELA_DB` > `$XDG_DATA_HOME/tela/tela.db` > `$HOME/.local/share/tela/tela.db`。
+/// 默认库路径。
+///
+/// `TELA_DB` > `$XDG_DATA_HOME/tela/tela.db` > Windows 的
+/// `%APPDATA%\tela\tela.db` > `$HOME/.local/share/tela/tela.db`。
+///
+/// Windows 上通常没有 `HOME`/`XDG_DATA_HOME`，必须走 `%APPDATA%`，否则会退回
+/// 「当前目录的 tela.db」——双击 exe 时就是解压目录，既不合规范也容易被误删。
 fn db_path_from_env() -> PathBuf {
     if let Some(raw) = std::env::var_os(ENV_DB) {
         return PathBuf::from(raw);
     }
     if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(dir).join("tela").join("tela.db");
+    }
+    #[cfg(windows)]
+    {
+        for key in ["APPDATA", "LOCALAPPDATA", "USERPROFILE"] {
+            if let Some(dir) = std::env::var_os(key) {
+                return PathBuf::from(dir).join("tela").join("tela.db");
+            }
+        }
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home)
@@ -334,11 +360,15 @@ impl AppServices {
         Ok(services)
     }
 
-    /// GUI 装配：`TELA_DEMO=0` 走真实 API，否则 demo（保留开箱即用）。
-    pub fn bootstrap_gui() -> Result<Self, TelaError> {
-        match std::env::var(ENV_DEMO).ok().as_deref() {
-            Some("0") => Self::bootstrap_real(),
-            _ => Self::bootstrap_demo(),
+    /// GUI 装配：默认真实 API（登录模式），`--demo` 或 `TELA_DEMO=1` 进入演示。
+    ///
+    /// demo 是显式选择：发布包内置 client id（见 [`DEFAULT_CLIENT_ID`]），
+    /// 用户双击就应该看到「登录 Tela」，而不是只有演示数据。
+    pub fn bootstrap_gui(force_demo: bool) -> Result<Self, TelaError> {
+        if force_demo || demo_requested_by_env() {
+            Self::bootstrap_demo()
+        } else {
+            Self::bootstrap_real()
         }
     }
 
@@ -478,7 +508,7 @@ impl AppServices {
     /// 绑定回环端口并返回授权 URL（很快；不等待浏览器）。
     pub fn begin_login(&self) -> Result<LoginTicket, TelaError> {
         let auth = self.auth.as_ref().ok_or_else(|| TelaError::Config {
-            detail: "demo 装配不支持登录；请用 scripts/tela-gui-real.sh 或 `tela-app login`".into(),
+            detail: "demo 装配不支持登录；用真实模式（去掉 --demo）或 `tela-app login`".into(),
         })?;
         let pending = auth.begin_login()?;
         let nonce = self.next_login.fetch_add(1, Ordering::SeqCst);
@@ -901,6 +931,24 @@ fn demo_is_default() -> bool {
     !matches!(std::env::var(ENV_DEV_SEED).ok().as_deref(), Some("0"))
 }
 
+/// `TELA_DEMO` 是否要求演示装配（默认不要求：真实登录模式）。
+fn demo_requested_by_env() -> bool {
+    std::env::var(ENV_DEMO)
+        .ok()
+        .is_some_and(|value| is_demo_value(&value))
+}
+
+/// `TELA_DEMO` 的真值：只有明确的 `1/true/yes/on` 才算 demo。
+///
+/// 不把「未设置/空/其它值」当 demo：发布包必须默认进登录模式；
+/// `TELA_DEMO=0` 仍表示真实，兼容旧脚本。
+fn is_demo_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// 演示快照：2 个订阅 + 4 篇文章（正常 / 长章节 / 无译文 / 已读）。
 fn demo_sync(lang: &str) -> SyncResponse {
     // 用「现在」而不是固定常量：真实协议按 fetchedAt 判断地平线，
@@ -1137,5 +1185,16 @@ mod tests {
             "reader.hide_read",
             serde_json::Value::Bool(false)
         )]));
+    }
+
+    #[test]
+    fn demo_env_only_accepts_explicit_truthy_values() {
+        for value in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(is_demo_value(value), "{value:?} 应进入 demo");
+        }
+        // 默认（未设置/空/0/其它）都必须是真实登录模式。
+        for value in ["", "0", "false", "no", "off", "demo"] {
+            assert!(!is_demo_value(value), "{value:?} 不应进入 demo");
+        }
     }
 }
