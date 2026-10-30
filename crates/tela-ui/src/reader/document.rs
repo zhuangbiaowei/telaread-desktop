@@ -8,14 +8,12 @@
 //! 1. **一段 = 一个顶层块**，索引连续且稳定（不错位、不合并、不丢块）；
 //! 2. 原文/译文都从 HTML 片段剥离为纯文本，图片等无文字块给非空降级文本，
 //!    否则界面会出现常驻空白行；
-//! 3. 译文按块索引对齐，缺失段保持 `None` 空洞（不前移），渲染时给明确占位文案。
+//! 3. 译文按块索引对齐，缺失段保持 `None` 空洞（不前移），渲染时回退原文；
+//!    代码块、图片块、过短文本等被服务端标记为 `skip` 的段落不算“缺译文”。
 
 use tela_content::{Chapter, ChapterRequest, TranslationView};
 
 use crate::reader::ViewMode;
-
-/// 译文缺失时对照视图的占位文案（禁止空白常驻）。
-pub const MISSING_TRANSLATION: &str = "（本段暂无译文）";
 
 /// 图片块在无可用图片渲染时的降级文本前缀。
 pub const IMAGE_PLACEHOLDER: &str = "[图片";
@@ -29,10 +27,19 @@ pub struct ReaderParagraph {
     pub tag: String,
     /// 该块的叶子 id（稳定锚点，后续高亮/定位用）。
     pub leaves: Vec<String>,
+    /// 原始 HTML（GUI 富文本渲染用：标题、链接、代码、图片、引用）。
+    pub original_html: String,
     /// 剥离标签后的原文。
     pub original: String,
+    /// 对齐后的译文 HTML；`None` = 该段没有译文（保持空洞，不前移）。
+    pub translation_html: Option<String>,
     /// 对齐后的译文；`None` = 该段没有译文（保持空洞，不前移）。
     pub translation: Option<String>,
+    /// 该段是否有需要翻译的文字。
+    ///
+    /// 代码块、纯图片块、过短文本、纯地址等由服务端标记为不翻译；它们没有
+    /// 译文是正常的，不应计入“译文部分缺失”。
+    pub translatable: bool,
 }
 
 impl ReaderParagraph {
@@ -49,8 +56,12 @@ pub struct ReaderRow {
     pub index: usize,
     /// 语义标签。
     pub tag: String,
+    /// 原文 HTML（GUI 富文本渲染）。
+    pub original_html: String,
     /// 原文列内容。
     pub original: String,
+    /// 译文 HTML（GUI 富文本渲染）；缺译文时为 `None`。
+    pub translation_html: Option<String>,
     /// 译文列内容；缺译文时为占位文案或原文回退，绝不为空白。
     pub translation: String,
     /// 该段译文是否缺失（界面据此显示降级样式）。
@@ -81,7 +92,7 @@ impl TranslationStatus {
             Self::Missing => "本章暂无译文，已显示原文",
             Self::Pending => "翻译进行中，先显示原文",
             Self::Complete => "译文已就绪",
-            Self::Partial => "译文部分缺失，缺失段落已标注",
+            Self::Partial => "译文部分缺失（未翻译段落显示原文）",
         }
     }
 
@@ -104,20 +115,78 @@ pub struct ReaderDocument {
     pub translation_status: TranslationStatus,
     /// 按块顺序排列的段落。
     pub paragraphs: Vec<ReaderParagraph>,
+    /// 正文（含译文）里出现的图片 URL，按首次出现顺序去重。
+    ///
+    /// GUI 用它在后台带认证下载图片；这里只收集，不做 IO。
+    pub image_sources: Vec<String>,
 }
 
 impl ReaderDocument {
     /// 由 API 层的 `Chapter` 构造阅读文档（纯映射，无 IO）。
     pub fn from_chapter(request: &ChapterRequest, chapter: &Chapter) -> Self {
         let aligned = chapter.translation.aligned();
+
+        let mut image_sources = Vec::new();
+        let paragraphs: Vec<ReaderParagraph> = chapter
+            .content
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                let raw_translation = aligned
+                    .and_then(|list| list.get(index).cloned().flatten())
+                    .filter(|raw| !raw.trim().is_empty());
+                let translation = raw_translation
+                    .as_deref()
+                    .map(html_to_text)
+                    .filter(|text| !text.is_empty());
+                let translation_html = if translation.is_some() {
+                    raw_translation
+                } else {
+                    None
+                };
+
+                // 服务端会把代码块、纯图、过短文本、纯地址的叶子标成 skip；
+                // 这类块没有译文是设计如此，不参与“缺译”统计。
+                let translatable = block.tag != "pre"
+                    && !block.leaves.is_empty()
+                    && block.leaves.iter().any(|id| {
+                        chapter
+                            .content
+                            .leaves
+                            .get(id)
+                            .map(|info| !info.skip)
+                            .unwrap_or(true)
+                    });
+
+                push_images(&mut image_sources, &block.html);
+                if let Some(html) = &translation_html {
+                    push_images(&mut image_sources, html);
+                }
+
+                ReaderParagraph {
+                    index,
+                    tag: block.tag.clone(),
+                    leaves: block.leaves.clone(),
+                    original_html: block.html.clone(),
+                    original: html_to_text(&block.html),
+                    translation_html,
+                    translation,
+                    translatable,
+                }
+            })
+            .collect();
+
+        let translatable_count = paragraphs.iter().filter(|p| p.translatable).count();
+        let gaps = paragraphs
+            .iter()
+            .filter(|p| p.translatable && p.translation_missing())
+            .count();
         let translation_status = match &chapter.translation {
             TranslationView::NotAvailable => TranslationStatus::Missing,
             TranslationView::Pending { .. } => TranslationStatus::Pending,
             TranslationView::Ready { .. } => {
-                let gaps = aligned
-                    .map(|list| list.iter().filter(|slot| slot.is_none()).count())
-                    .unwrap_or(chapter.content.blocks.len());
-                if aligned.is_none() || gaps == chapter.content.blocks.len() {
+                if aligned.is_none() || (translatable_count > 0 && gaps == translatable_count) {
                     TranslationStatus::Missing
                 } else if gaps > 0 {
                     TranslationStatus::Partial
@@ -127,32 +196,13 @@ impl ReaderDocument {
             }
         };
 
-        let paragraphs = chapter
-            .content
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| {
-                let translation = aligned
-                    .and_then(|list| list.get(index).cloned().flatten())
-                    .map(|raw| html_to_text(&raw))
-                    .filter(|text| !text.is_empty());
-                ReaderParagraph {
-                    index,
-                    tag: block.tag.clone(),
-                    leaves: block.leaves.clone(),
-                    original: html_to_text(&block.html),
-                    translation,
-                }
-            })
-            .collect();
-
         Self {
             content_key: request.content_key.clone(),
             lang: request.lang.clone(),
             source_lang: chapter.content.lang.clone(),
             translation_status,
             paragraphs,
+            image_sources,
         }
     }
 
@@ -166,39 +216,42 @@ impl ReaderDocument {
         self.paragraphs.is_empty()
     }
 
-    /// 缺译文的段落数（对照视图的降级计数）。
+    /// 缺译文的段落数（只统计本来就需要翻译的段落）。
     pub fn gap_count(&self) -> usize {
         self.paragraphs
             .iter()
-            .filter(|p| p.translation_missing())
+            .filter(|p| p.translatable && p.translation_missing())
             .count()
+    }
+
+    /// 需要翻译的段落数。
+    pub fn translatable_count(&self) -> usize {
+        self.paragraphs.iter().filter(|p| p.translatable).count()
     }
 
     /// 是否有任何译文可用。
     pub fn has_translation(&self) -> bool {
-        !self.translation_status.is_missing() && self.gap_count() < self.paragraphs.len()
+        let translatable = self.translatable_count();
+        !self.translation_status.is_missing()
+            && (translatable == 0 || self.gap_count() < translatable)
     }
 
     /// 取某段在当前视图下的渲染行；索引越界返回 `None`。
     pub fn row(&self, index: usize, mode: ViewMode) -> Option<ReaderRow> {
         let paragraph = self.paragraphs.get(index)?;
+        // 缺译文时回退原文（与 Web 一致）：代码/图片/超出翻译额度的段落
+        // 仍然可读，不再在每段中间插一句“本段暂无译文”。
         let (translation, translation_missing) = match &paragraph.translation {
             Some(text) => (text.clone(), false),
-            None => (
-                match mode {
-                    // 译文视图缺译文时回退原文，而不是留空白。
-                    ViewMode::Translation => paragraph.original.clone(),
-                    // 原文 / 对照视图给出显式占位文案。
-                    ViewMode::Original | ViewMode::Compare => MISSING_TRANSLATION.to_string(),
-                },
-                true,
-            ),
+            None => (paragraph.original.clone(), true),
         };
 
         Some(ReaderRow {
             index: paragraph.index,
             tag: paragraph.tag.clone(),
+            original_html: paragraph.original_html.clone(),
             original: paragraph.original.clone(),
+            translation_html: paragraph.translation_html.clone(),
             translation,
             translation_missing,
             show_original: !matches!(mode, ViewMode::Translation),
@@ -214,6 +267,44 @@ impl ReaderDocument {
             .take(limit)
             .filter_map(|p| self.row(p.index, mode))
             .collect()
+    }
+}
+
+/// 收集 HTML 片段里的图片 URL（按出现顺序，不处理 `data:` 内联图）。
+///
+/// 服务端已把正文图片改写成 `/img/<key>/<i>`，阅读面板需要先知道有哪些
+/// 地址，才能在后台带认证下载。`data:` 图由 GPUI 自己解码，不走这里。
+pub fn image_sources_in_html(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+
+    while let Some(lt) = rest.find('<') {
+        rest = &rest[lt..];
+        let Some(gt) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[1..gt];
+        if tag_name(tag) == "img"
+            && let Some(src) = attribute(tag, "src")
+        {
+            let src = decode_entities(src.trim());
+            if !src.is_empty() && !src.starts_with("data:") && !out.iter().any(|item| item == &src)
+            {
+                out.push(src);
+            }
+        }
+        rest = &rest[gt + 1..];
+    }
+
+    out
+}
+
+/// 追加图片地址并去重（原文与译文经常引用同一张图）。
+fn push_images(out: &mut Vec<String>, html: &str) {
+    for src in image_sources_in_html(html) {
+        if !out.iter().any(|item| item == &src) {
+            out.push(src);
+        }
     }
 }
 
@@ -398,4 +489,62 @@ fn normalize_whitespace(text: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// 取出 `<pre>` 里的代码文本（保留空白、换行与实体），供 GUI 自定义代码块渲染。
+///
+/// GPUI 的 HTML 视图把 `<pre><code>` 里的 `<code>` 当作行内代码处理，会给
+/// 每一行套上浅色圆角背景；阅读面板因此单独渲染 `pre` 块，保持等宽、深色底。
+pub fn preformatted_text(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let inner = match lower.find("<pre") {
+        Some(start) => {
+            let after_open = lower[start..]
+                .find('>')
+                .map(|offset| start + offset + 1)
+                .unwrap_or(start + 4);
+            let end = lower
+                .rfind("</pre>")
+                .filter(|end| *end >= after_open)
+                .unwrap_or(html.len());
+            &html[after_open..end]
+        }
+        None => html,
+    };
+    let text = strip_tags_preserving_whitespace(inner);
+    text.strip_prefix('\n')
+        .unwrap_or(&text)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
+/// 剥离标签但保留换行与缩进（代码块专用；`<br>` 转成换行）。
+fn strip_tags_preserving_whitespace(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        rest = &rest[lt..];
+        let Some(gt) = rest.find('>') else {
+            break;
+        };
+        let tag = &rest[1..gt];
+        let name = tag_name(tag);
+        match name.as_str() {
+            "br" => out.push('\n'),
+            "img" => {
+                if let Some(alt) = attribute(tag, "alt").filter(|alt| !alt.trim().is_empty()) {
+                    out.push_str(IMAGE_PLACEHOLDER);
+                    out.push('：');
+                    out.push_str(alt.trim());
+                    out.push(']');
+                }
+            }
+            _ => {}
+        }
+        rest = &rest[gt + 1..];
+    }
+    out.push_str(rest);
+    decode_entities(&out)
 }

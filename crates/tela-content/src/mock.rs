@@ -82,6 +82,7 @@ fn long_chapter_object() -> ContentObject {
                 LeafInfo {
                     hash: format!("h-{leaf}"),
                     chars: text.chars().count() as i64,
+                    skip: false,
                 },
             );
             ContentBlock {
@@ -131,6 +132,7 @@ fn untranslated_chapter_object() -> ContentObject {
             LeafInfo {
                 hash: format!("h-{leaf}"),
                 chars: text.chars().count() as i64,
+                skip: false,
             },
         );
         ContentBlock {
@@ -333,6 +335,33 @@ impl ContentApi for MockContentApi {
         Ok(translation_object(content_key, lang)?
             .map(|_| mock_row(content_key, lang, TranslationState::Done)))
     }
+
+    fn load_image(&self, _src: &str) -> Result<Vec<u8>, TelaError> {
+        // 离线演示也要能看见“图片”，否则截图/验收里永远只有占位文字。
+        // 用 SVG 而不是内嵌二进制：可读、体积极小，GPUI 自带 SVG 渲染。
+        Ok(mock_cover_svg())
+    }
+}
+
+/// 演示正文里 `cover.png` 的离线替身（16:9 封面）。
+fn mock_cover_svg() -> Vec<u8> {
+    r##"<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#1e1e2e"/>
+    <stop offset="1" stop-color="#313244"/>
+  </linearGradient>
+</defs>
+<rect width="960" height="540" fill="url(#bg)"/>
+<circle cx="820" cy="90" r="180" fill="#89b4fa" opacity="0.16"/>
+<circle cx="130" cy="470" r="220" fill="#cba6f7" opacity="0.12"/>
+<text x="480" y="278" text-anchor="middle" font-family="sans-serif" font-size="76"
+      font-weight="600" fill="#cdd6f4">Tela</text>
+<text x="480" y="338" text-anchor="middle" font-family="sans-serif" font-size="26"
+      fill="#a6adc8">offline demo cover</text>
+</svg>"##
+        .as_bytes()
+        .to_vec()
 }
 
 /// mock 的译本行。

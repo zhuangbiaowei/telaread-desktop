@@ -3,11 +3,17 @@
 //! 用真实 GPUI 窗口 + mock 内容后端；不检查像素，只断言 ReaderSession 的状态
 //! 与视图方法的结果。这样“加载/重试错了”和“布局错了”能分开定位。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gpui::{AppContext, TestAppContext};
 use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::mock::{MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MockContentApi};
+use tela_content::model::{
+    Chapter, ContentBlock, ContentObject, ContentStats, TranslationAnswer, TranslationAnswerStatus,
+    TranslationView,
+};
 use tela_proto::TelaError;
 use tela_ui::gui::ReaderView;
 use tela_ui::reader::ViewMode;
@@ -183,4 +189,93 @@ fn missing_chapter_request_becomes_an_error_page(cx: &mut TestAppContext) {
             .to_string()
     });
     assert!(message.contains("99"));
+}
+
+/// 没有译本时，阅读面板必须主动向服务端发一次翻译请求，而不是永远退回原文。
+struct NoTranslationApi {
+    requests: Arc<AtomicUsize>,
+}
+
+impl ContentApi for NoTranslationApi {
+    fn load_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        let content = ContentObject {
+            format: 1,
+            norm: 0,
+            key: request.content_key.clone(),
+            lang: "en".to_string(),
+            blocks: vec![ContentBlock {
+                tag: "p".to_string(),
+                html: "<p>Untranslated text.</p>".to_string(),
+                leaves: Vec::new(),
+            }],
+            leaves: BTreeMap::new(),
+            images: Vec::new(),
+            stats: ContentStats::default(),
+        };
+        Ok(Chapter::new(content, TranslationView::NotAvailable))
+    }
+
+    fn request_translation(
+        &self,
+        _article_id: i64,
+        _lang: &str,
+    ) -> Result<TranslationAnswer, TelaError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Ok(TranslationAnswer {
+            status: TranslationAnswerStatus::Running,
+            translation: None,
+            reason: None,
+            resets_at: None,
+        })
+    }
+}
+
+#[gpui::test]
+fn missing_translation_requests_server_automatically(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let content: Arc<dyn ContentApi> = Arc::new(NoTranslationApi {
+        requests: Arc::clone(&requests),
+    });
+    let reader = cx.new(|cx| ReaderView::new(data("untranslated-key"), content, cx));
+    reader.update(cx, |reader, cx| {
+        reader.select(7, "没有译文".to_string(), cx);
+    });
+    cx.run_until_parked();
+
+    assert!(reader.read_with(cx, |reader, _| reader.session().state().is_ready()));
+    assert_eq!(
+        requests.load(Ordering::SeqCst),
+        1,
+        "缺少译文时应自动 POST 一次翻译请求"
+    );
+    assert!(
+        reader
+            .read_with(cx, |reader, _| reader
+                .translation_notice()
+                .map(str::to_string))
+            .is_some(),
+        "请求翻译后应给用户一个状态提示"
+    );
+}
+
+#[gpui::test]
+fn page_up_down_fall_back_to_paragraph_pages_without_layout(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
+    let reader = cx.new(|cx| ReaderView::new(data(MOCK_LONG_CONTENT_KEY), content, cx));
+    reader.update(cx, |reader, cx| {
+        reader.select(43, "长章节".to_string(), cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 0);
+    assert!(reader.update(cx, |reader, cx| reader.handle_key("pagedown", cx)));
+    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 1);
+    assert!(reader.update(cx, |reader, cx| reader.handle_key("pagedown", cx)));
+    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 2);
+    assert!(reader.update(cx, |reader, cx| reader.handle_key("pageup", cx)));
+    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 1);
 }

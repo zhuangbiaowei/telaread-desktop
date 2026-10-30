@@ -140,6 +140,66 @@ impl ShellViewModel {
         true
     }
 
+    /// 下一篇（`j`）：到文章列表末尾停住，不跨订阅。
+    pub fn next_article(&mut self) -> bool {
+        self.step_article(1)
+    }
+
+    /// 上一篇（`k`）：到文章列表开头停住，不跨订阅。
+    pub fn prev_article(&mut self) -> bool {
+        self.step_article(-1)
+    }
+
+    /// 下一个博客（`Shift+J`）：切换订阅并加载它的第一篇文章。
+    pub fn next_feed(&mut self, data: &dyn ShellData) -> bool {
+        self.step_feed(1, data)
+    }
+
+    /// 上一个博客（`Shift+K`）：切换订阅并加载它的第一篇文章。
+    pub fn prev_feed(&mut self, data: &dyn ShellData) -> bool {
+        self.step_feed(-1, data)
+    }
+
+    fn step_article(&mut self, delta: isize) -> bool {
+        if self.articles.is_empty() {
+            return false;
+        }
+        let current = self
+            .selected_article
+            .and_then(|id| self.articles.iter().position(|article| article.id == id));
+        let target = match current {
+            Some(index) => index.saturating_add_signed(delta),
+            None if delta > 0 => 0,
+            None => self.articles.len() - 1,
+        }
+        .min(self.articles.len() - 1);
+        if Some(target) == current {
+            return false;
+        }
+        self.selected_article = Some(self.articles[target].id);
+        true
+    }
+
+    fn step_feed(&mut self, delta: isize, data: &dyn ShellData) -> bool {
+        if self.feeds.is_empty() {
+            return false;
+        }
+        let current = self
+            .selected_feed
+            .and_then(|id| self.feeds.iter().position(|feed| feed.id == id));
+        let target = match current {
+            Some(index) => index.saturating_add_signed(delta),
+            None if delta > 0 => 0,
+            None => self.feeds.len() - 1,
+        }
+        .min(self.feeds.len() - 1);
+        if Some(target) == current {
+            return false;
+        }
+        let feed_id = self.feeds[target].id;
+        self.select_feed(feed_id, data)
+    }
+
     /// 当前选中的 feed。
     pub fn selected_feed_item(&self) -> Option<&FeedItem> {
         let id = self.selected_feed?;

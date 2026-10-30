@@ -136,6 +136,68 @@ impl ShellView {
         changed || marked
     }
 
+    /// 下一篇（`j`）：停在当前订阅的文章列表末尾。
+    pub fn next_article(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.model.next_article() {
+            return false;
+        }
+        self.sync_reader(cx);
+        if let Some(article_id) = self.model.selected_article {
+            let _ = self.mark_read_if_needed(article_id, cx);
+        }
+        true
+    }
+
+    /// 上一篇（`k`）：停在当前订阅的文章列表开头。
+    pub fn prev_article(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.model.prev_article() {
+            return false;
+        }
+        self.sync_reader(cx);
+        if let Some(article_id) = self.model.selected_article {
+            let _ = self.mark_read_if_needed(article_id, cx);
+        }
+        true
+    }
+
+    /// 下一个博客（`Shift+J`）：切换订阅并打开它的第一篇文章。
+    pub fn next_feed(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.model.next_feed(self.data.as_ref()) {
+            return false;
+        }
+        self.sync_reader(cx);
+        if let Some(article_id) = self.model.selected_article {
+            let _ = self.mark_read_if_needed(article_id, cx);
+        }
+        true
+    }
+
+    /// 上一个博客（`Shift+K`）。
+    pub fn prev_feed(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.model.prev_feed(self.data.as_ref()) {
+            return false;
+        }
+        self.sync_reader(cx);
+        if let Some(article_id) = self.model.selected_article {
+            let _ = self.mark_read_if_needed(article_id, cx);
+        }
+        true
+    }
+
+    /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客。
+    ///
+    /// 阅读面板自己处理 `o/c/t/n/p/PageUp/PageDown`；这里只接管需要改
+    /// 选中项的键，事件从阅读面板冒泡上来后调用。
+    pub fn handle_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
+        match (key.to_ascii_lowercase().as_str(), shift) {
+            ("j", false) => self.next_article(cx),
+            ("k", false) => self.prev_article(cx),
+            ("j", true) => self.next_feed(cx),
+            ("k", true) => self.prev_feed(cx),
+            _ => false,
+        }
+    }
+
     /// 重新从数据源刷新（后台同步完成后调用）。
     pub fn reload(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.model.reload(self.data.as_ref());
@@ -910,9 +972,19 @@ impl Render for ShellView {
         let sidebar = self.sidebar(cx);
         let main = self.main_panel(cx);
         h_flex()
+            .id("shell-root")
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control || modifiers.alt || modifiers.platform {
+                    return;
+                }
+                if this.handle_shortcut(&event.keystroke.key, modifiers.shift, cx) {
+                    cx.notify();
+                }
+            }))
             .child(sidebar)
             .child(main)
     }

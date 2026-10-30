@@ -11,7 +11,7 @@ use gpui::{
     px, size,
 };
 use tela_content::api::{ChapterRequest, ContentApi};
-use tela_content::mock::MockContentApi;
+use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
 use tela_ui::shell::{ArticleItem, FeedItem, ShellData};
@@ -20,6 +20,8 @@ use tela_ui::shell::{ArticleItem, FeedItem, ShellData};
 struct FakeData {
     feeds: Vec<FeedItem>,
     articles: HashMap<i64, Vec<ArticleItem>>,
+    /// 指定所有文章共用的正文 key；默认用 article id（多数测试只验证列表）。
+    content_key: Option<String>,
 }
 
 impl ShellData for FakeData {
@@ -32,7 +34,12 @@ impl ShellData for FakeData {
     }
 
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError> {
-        Ok(ChapterRequest::new(article_id.to_string(), "zh-Hans"))
+        Ok(ChapterRequest::new(
+            self.content_key
+                .clone()
+                .unwrap_or_else(|| article_id.to_string()),
+            "zh-Hans",
+        ))
     }
 }
 
@@ -62,12 +69,20 @@ fn open_window<V: Render>(
     cx: &mut TestAppContext,
     build: impl FnOnce(&mut Window, &mut gpui::App) -> Entity<V>,
 ) -> (gpui::AnyWindowHandle, Entity<V>) {
+    open_window_sized(cx, size(px(1100.), px(720.)), build)
+}
+
+fn open_window_sized<V: Render>(
+    cx: &mut TestAppContext,
+    window_size: gpui::Size<gpui::Pixels>,
+    build: impl FnOnce(&mut Window, &mut gpui::App) -> Entity<V>,
+) -> (gpui::AnyWindowHandle, Entity<V>) {
     cx.update(|cx| {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::default(),
-                    size: size(px(1100.), px(720.)),
+                    size: window_size,
                 })),
                 ..Default::default()
             },
@@ -95,6 +110,7 @@ fn shell_renders_and_switches_feeds(cx: &mut TestAppContext) {
             ),
             (2, vec![article(45, 2, "Rust 周报")]),
         ]),
+        ..FakeData::default()
     });
     let data_for_view: Arc<dyn ShellData> = data;
     let (window, view) = open_window(cx, move |_, cx| {
@@ -140,6 +156,116 @@ fn shell_renders_empty_state_without_panicking(cx: &mut TestAppContext) {
         assert!(model.is_empty());
         assert!(model.feeds_error.is_none());
         assert_eq!(model.status_line(), "还没有订阅");
+    })
+    .unwrap();
+}
+
+/// 键盘快捷键：j/k 文章，Shift+j/k 博客；事件从阅读面板冒泡到外壳。
+#[gpui::test]
+fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 3, 3), feed(2, "B", 2, 2)],
+        articles: HashMap::from([
+            (
+                1,
+                vec![
+                    article(10, 1, "A1"),
+                    article(11, 1, "A2"),
+                    article(12, 1, "A3"),
+                ],
+            ),
+            (2, vec![article(20, 2, "B1"), article(21, 2, "B2")]),
+        ]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let (window, view) = open_window_sized(cx, size(px(900.), px(420.)), move |_, cx| {
+        cx.new(|cx| ShellView::new(data_for_view, content(), cx))
+    });
+
+    // 首帧让阅读面板拿到焦点（它会在 render 里 focus 自己），再画一帧
+    // 让异步加载的图片进入布局，正文才会真的超过一屏。
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| view.read(cx).reader().read(cx).session().page()),
+        0
+    );
+
+    // PageDown/PageUp 必须穿过可选择的 TextView，按视口滚动正文。
+    // 这篇 5 段正文比窗口高，但段落分页只有 1 页。
+    let before = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        let reader = reader.read(cx);
+        (reader.session().page(), reader.scroll_offset().y)
+    });
+    assert_eq!(before, (0, px(0.)));
+
+    cx.simulate_keystrokes(window, "pagedown");
+    let after_down = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        let reader = reader.read(cx);
+        (reader.session().page(), reader.scroll_offset().y)
+    });
+    assert_eq!(after_down.0, 0, "不应再按段落切页");
+    assert!(after_down.1 < px(0.), "PageDown 应向下滚动正文");
+
+    cx.simulate_keystrokes(window, "pageup");
+    let after_up = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        let reader = reader.read(cx);
+        reader.scroll_offset().y
+    });
+    assert_eq!(after_up, px(0.), "PageUp 应回到顶部");
+
+    cx.simulate_keystrokes(window, "j");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(11)
+    );
+    cx.simulate_keystrokes(window, "j");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(12)
+    );
+    cx.simulate_keystrokes(window, "j");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(12),
+        "最后一篇后停住"
+    );
+    cx.simulate_keystrokes(window, "k");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(11)
+    );
+
+    cx.simulate_keystrokes(window, "shift-j");
+    assert_eq!(cx.update(|cx| view.read(cx).model().selected_feed), Some(2));
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(20),
+        "换博客后打开第一篇"
+    );
+    cx.simulate_keystrokes(window, "shift-k");
+    assert_eq!(cx.update(|cx| view.read(cx).model().selected_feed), Some(1));
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(10)
+    );
+
+    // 下一帧仍然能渲染（快捷键没有把视图卡在错误状态）。
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
     })
     .unwrap();
 }

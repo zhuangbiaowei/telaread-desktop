@@ -6,7 +6,7 @@
 #   3. release：汇总两个平台的压缩包，创建 GitHub Release。
 #
 # 约定：
-#   - tag 形如 v0.1.0；预发布可用 v0.1.0-rc.1（自动标记 prerelease）；
+#   - tag 形如 v0.2.0；预发布可用 v0.2.0-rc.1（自动标记 prerelease）；
 #   - tag 去掉前缀 v 与 -rc.N 后必须等于 tela-app 的 Cargo 版本；
 #   - 只有 tag 推送会触发，普通 main 推送仍走 ci.yml。
 

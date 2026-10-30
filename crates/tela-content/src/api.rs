@@ -72,6 +72,17 @@ pub trait ContentApi: Send + Sync {
         })
     }
 
+    /// 取正文里的图片字节（`/img/…` 代理，需要会话）。
+    ///
+    /// 服务端会把块 HTML 里的图片改写成相对路径 `/img/<key>/<i>`，客户端
+    /// 不能把远程 URL 直接交给 GPUI，否则会绕过认证与缓存；阅读面板通过
+    /// 这一方法下载字节，再交给 `ImageSource::Image` 渲染。
+    fn load_image(&self, _src: &str) -> Result<Vec<u8>, TelaError> {
+        Err(TelaError::Config {
+            detail: "当前内容后端不支持图片".into(),
+        })
+    }
+
     /// 由正文对象构造译文视图（默认实现：查状态 → 需要时取译本对象）。
     ///
     /// 有正文缓存的后端可以只走这一条，避免重复下载不可变的正文。

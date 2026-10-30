@@ -14,7 +14,7 @@ use tela_content::model::Chapter;
 use tela_proto::TelaError;
 
 use crate::reader::ViewMode;
-use crate::reader::document::{ReaderDocument, ReaderRow};
+use crate::reader::document::{ReaderDocument, ReaderRow, TranslationStatus};
 
 /// 一页默认渲染的段落数（长章节分页 / 懒加载的页大小）。
 pub const DEFAULT_PAGE_SIZE: usize = 20;
@@ -82,7 +82,16 @@ impl ReaderState {
         match self {
             Self::Loading => "加载中…".to_string(),
             Self::Empty => EMPTY_HINT.to_string(),
-            Self::Ready(doc) => doc.translation_status.label().to_string(),
+            Self::Ready(doc) => match doc.translation_status {
+                TranslationStatus::Partial => {
+                    format!(
+                        "{}（{} 段显示原文）",
+                        doc.translation_status.label(),
+                        doc.gap_count()
+                    )
+                }
+                _ => doc.translation_status.label().to_string(),
+            },
             Self::Failed { message, .. } => format!("加载失败：{message}（按 r 重试）"),
         }
     }

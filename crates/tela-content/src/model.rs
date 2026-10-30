@@ -106,6 +106,9 @@ pub struct LeafInfo {
     /// 字符数（服务端口径）。
     #[serde(default)]
     pub chars: i64,
+    /// 服务端标记该叶子不翻译（代码块、过短文本、纯地址等）。
+    #[serde(default)]
+    pub skip: bool,
 }
 
 /// 正文统计。

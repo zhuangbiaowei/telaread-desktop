@@ -140,21 +140,29 @@ fn translation_view_falls_back_to_original_for_missing_gaps() {
     );
 }
 
-/// 对照视图下缺译文给出显式占位文案（不是空白，也不前移）。
+/// 对照视图下缺译文回退原文，并显式标注“原文回退”（不是空白、不前移）。
 #[test]
-fn compare_view_marks_missing_translation_explicitly() {
+fn compare_view_falls_back_to_original_for_missing_translation() {
     let mut session = session_with(MockContentApi::new(), MOCK_PARTIAL_CONTENT_KEY);
     session.load();
 
     let lines = render_session(&session);
     assert_no_blank_lines(&lines);
-    let placeholders = lines
-        .iter()
-        .filter(|line| line.as_str() == "译文：（本段暂无译文）")
-        .count();
+    let fallbacks = lines_with_prefix(&lines, "译文（原文回退）：");
     assert_eq!(
-        placeholders, 2,
-        "partial 章节 2 段缺译文必须显式占位：{lines:#?}"
+        fallbacks.len(),
+        2,
+        "partial 章节 2 段缺译文必须回退原文：{lines:#?}"
+    );
+    assert!(
+        fallbacks
+            .iter()
+            .any(|line| line.contains("A desktop reader built around blocks.")),
+        "回退行必须显示该段原文：{fallbacks:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("本段暂无译文")),
+        "不应再出现每段占位句：{lines:#?}"
     );
 }
 

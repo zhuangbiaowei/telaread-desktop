@@ -100,6 +100,12 @@ impl ContentApi for HttpContentApi {
     fn load_translation_object(&self, path: &str) -> Result<TranslationObject, TelaError> {
         self.api.get_json(path)
     }
+
+    fn load_image(&self, src: &str) -> Result<Vec<u8>, TelaError> {
+        // `/img/…` 是相对路径，ApiClient 会拼到 API 基址上并带 Bearer；
+        // 服务端也有直接把图片写成绝对 URL 的情况，get_bytes 原样使用。
+        self.api.get_bytes(src)
+    }
 }
 
 /// 正文 key 归一化：接受裸 key 或旧的 `c/<key>.json` 形状。

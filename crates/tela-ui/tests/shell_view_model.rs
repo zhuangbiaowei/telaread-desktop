@@ -204,3 +204,44 @@ fn feed_error_clears_selection_but_article_error_keeps_feeds() {
     assert!(model.status_line().contains("订阅列表加载失败"));
     assert!(!model.is_empty(), "错误态不能被当成空态");
 }
+
+/// j/k 在文章列表内移动并夹在两端；Shift+j/k 切换订阅并回到该订阅第一篇。
+#[test]
+fn article_and_feed_navigation_step_and_clamp() {
+    let data = FakeData::with(
+        vec![feed(1, "A", 3, 3), feed(2, "B", 2, 2)],
+        vec![
+            (
+                1,
+                vec![
+                    article(10, 1, "A1", true),
+                    article(11, 1, "A2", true),
+                    article(12, 1, "A3", true),
+                ],
+            ),
+            (
+                2,
+                vec![article(20, 2, "B1", true), article(21, 2, "B2", true)],
+            ),
+        ],
+    );
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+
+    assert_eq!(model.selected_article, Some(10));
+    assert!(model.next_article());
+    assert_eq!(model.selected_article, Some(11));
+    assert!(model.next_article());
+    assert_eq!(model.selected_article, Some(12));
+    assert!(!model.next_article(), "末篇不应越界或跨订阅");
+    assert!(model.prev_article());
+    assert_eq!(model.selected_article, Some(11));
+
+    assert!(model.next_feed(&data));
+    assert_eq!(model.selected_feed, Some(2));
+    assert_eq!(model.selected_article, Some(20), "换博客后打开第一篇");
+    assert!(!model.next_feed(&data), "最后一个博客不应越界");
+    assert!(model.prev_feed(&data));
+    assert_eq!(model.selected_feed, Some(1));
+    assert_eq!(model.selected_article, Some(10));
+}

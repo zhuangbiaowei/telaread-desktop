@@ -8,7 +8,6 @@
 //! 阅读页仍必须可验证，所以「页面长什么样」收敛成一个纯函数（会话 → 行），
 //! GUI 组件与终端入口共用同一份渲染逻辑，不会出现两套视觉/两套行为。
 
-use crate::reader::ViewMode;
 use crate::reader::session::ReaderSession;
 
 /// 页头与正文之间的分隔线（同时充当「页面已渲染」的可见证据）。
@@ -32,14 +31,14 @@ pub fn render_session(session: &ReaderSession) -> Vec<String> {
     lines.push(status_bar(session));
     lines.push(PAGE_RULE.to_string());
 
-    let mode = session.mode();
     for row in session.visible_rows() {
         lines.push(format!("[{:02}] {}", row.index + 1, row.tag));
         if row.show_original {
             lines.push(format!("{ORIGINAL_COLUMN}{}", row.original));
         }
         if row.show_translation {
-            if row.translation_missing && mode == ViewMode::Translation {
+            if row.translation_missing {
+                // 缺失段落回退原文；显式标出，终端里不会误以为这是译文。
                 lines.push(format!("{TRANSLATION_FALLBACK_COLUMN}{}", row.translation));
             } else {
                 lines.push(format!("{TRANSLATION_COLUMN}{}", row.translation));

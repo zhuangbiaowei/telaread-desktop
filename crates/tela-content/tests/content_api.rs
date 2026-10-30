@@ -175,3 +175,22 @@ fn translation_requests_post_article_and_language() {
     assert_eq!(body["articleId"], 401);
     assert_eq!(body["lang"], "zh-Hans");
 }
+
+/// 图片代理必须走已认证的 ApiClient；相对路径 `/img/…` 要拼到 API 基址。
+#[test]
+fn image_proxy_is_fetched_with_auth() {
+    let server = MockServer::start(1, |_| (200, "fake-image-bytes".to_string()));
+    let api = HttpContentApi::new(api(&server));
+
+    let bytes = api.load_image(&format!("/img/{KEY}/0")).unwrap();
+    assert_eq!(bytes, b"fake-image-bytes");
+
+    let request = &server.requests()[0];
+    assert_eq!(request.method, "GET");
+    assert_eq!(request.path, format!("/img/{KEY}/0"));
+    assert_eq!(
+        request.header("authorization"),
+        Some("Bearer tela_at_test"),
+        "图片必须带会话认证，不能匿名拉取"
+    );
+}

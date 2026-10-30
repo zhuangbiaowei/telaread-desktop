@@ -60,7 +60,7 @@ cargo run -p tela-app -- demo --chapter mock-long
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.1.0
+cargo run -p tela-app -- --version                        # tela-app 0.2.0
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -144,8 +144,8 @@ TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
 
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
-git tag -a v0.1.0 -m "Tela Desktop v0.1.0"
-git push origin v0.1.0
+git tag -a v0.2.0 -m "Tela Desktop v0.2.0"
+git push origin v0.2.0
 ```
 
 推送 tag 后：
@@ -159,8 +159,8 @@ git push origin v0.1.0
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.1.0-rc.1 -m "Tela Desktop v0.1.0-rc.1"
-git push origin v0.1.0-rc.1
+git tag -a v0.2.0-rc.1 -m "Tela Desktop v0.2.0-rc.1"
+git push origin v0.2.0-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建。
