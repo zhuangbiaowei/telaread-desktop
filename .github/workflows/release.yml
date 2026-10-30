@@ -123,6 +123,34 @@ jobs:
       - name: Build release binaries (CLI + GUI)
         run: cargo build --release --locked -p tela-app --features gui --bins
 
+      # 回归护栏：v0.2.0 的 Windows 包漏了静态 CRT，用户解压后双击
+      # tela-gui.exe 直接报 "VCRUNTIME140.dll was not found"。
+      # 开关在 .cargo/config.toml（crt-static），这里只负责验证产物确实不再
+      # 依赖 VC++ 运行库。PE 导入表里的 DLL 名是 ASCII/UTF-8 明文，
+      # 扫二进制即可，不需要 dumpbin / VS 开发者命令行。
+      - name: Verify CRT is statically linked (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runtimeDlls = @('VCRUNTIME140.dll', 'VCRUNTIME140_1.dll', 'MSVCP140.dll')
+          $bad = @()
+          foreach ($exe in @('target/release/tela-app.exe', 'target/release/tela-gui.exe')) {
+            $path = (Resolve-Path $exe).Path
+            $ascii = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($path))
+            foreach ($dll in $runtimeDlls) {
+              if ($ascii.IndexOf($dll, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                $bad += "$exe -> $dll"
+              }
+            }
+          }
+          if ($bad.Count -gt 0) {
+            Write-Host '以下可执行文件仍然动态依赖 VC++ 运行库，解压后无法在干净机器上启动：'
+            $bad | ForEach-Object { Write-Host "  $_" }
+            Write-Host '请检查 .cargo/config.toml 里的 crt-static 是否被 RUSTFLAGS / 构建脚本覆盖。'
+            exit 1
+          }
+          Write-Host 'OK: tela-app.exe / tela-gui.exe 均不引用 VC++ 运行库 DLL。'
+
       - name: Package (Linux)
         if: runner.os == 'Linux'
         shell: bash

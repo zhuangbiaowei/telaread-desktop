@@ -166,6 +166,18 @@ git push origin v0.2.0-rc.1
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建。
 当前不生成 macOS 产物。
 
+### Windows 包是「解压即用」的
+
+Windows 的 exe 静态链接 MSVC/C 运行库（见 [`.cargo/config.toml`](./.cargo/config.toml)
+里的 `crt-static`），解压后直接双击 `tela-gui.exe` 即可，**不需要**另行安装
+Visual C++ Redistributable。`release.yml` 在打包前会扫描两个 exe 的导入表，
+一旦重新引入 `VCRUNTIME140.dll` / `MSVCP140.dll` 就让构建失败。
+
+> **v0.2.0 的 Windows 包没有这个处理**：双击会报
+> `VCRUNTIME140.dll was not found`。临时办法是安装
+> [Microsoft Visual C++ 2015–2022 Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe)，
+> 或者等下一个 tag（如 v0.2.1）重新发布。
+
 ## 文档
 
 | 文档 | 内容 |
