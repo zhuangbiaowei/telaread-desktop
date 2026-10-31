@@ -7,12 +7,15 @@ use std::collections::HashMap;
 
 use tela_content::api::ChapterRequest;
 use tela_proto::TelaError;
-use tela_ui::shell::{ArticleItem, FeedItem, ShellData, ShellViewModel};
+use tela_ui::shell::{
+    ArticleItem, FeedItem, RecommendationItem, ShellData, ShellSection, ShellViewModel,
+};
 
 #[derive(Default)]
 struct FakeData {
     feeds: Option<Result<Vec<FeedItem>, String>>,
     articles: HashMap<i64, Result<Vec<ArticleItem>, String>>,
+    recommendations: Option<Result<Vec<RecommendationItem>, String>>,
 }
 
 impl FakeData {
@@ -23,7 +26,13 @@ impl FakeData {
                 .into_iter()
                 .map(|(id, rows)| (id, Ok(rows)))
                 .collect(),
+            recommendations: None,
         }
+    }
+
+    fn with_recommendations(mut self, recommendations: Vec<RecommendationItem>) -> Self {
+        self.recommendations = Some(Ok(recommendations));
+        self
     }
 }
 
@@ -47,6 +56,14 @@ impl ShellData for FakeData {
     fn articles(&self, feed_id: i64) -> Result<Vec<ArticleItem>, TelaError> {
         match self.articles.get(&feed_id) {
             Some(Ok(articles)) => Ok(articles.clone()),
+            Some(Err(error)) => Err(err(error)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
+        match &self.recommendations {
+            Some(Ok(recommendations)) => Ok(recommendations.clone()),
             Some(Err(error)) => Err(err(error)),
             None => Ok(Vec::new()),
         }
@@ -77,6 +94,18 @@ fn article(id: i64, feed_id: i64, title: &str, unread: bool) -> ArticleItem {
         unread,
         published_at: Some(1_761_350_400 + id),
         excerpt: None,
+    }
+}
+
+fn recommendation(article_id: i64, title: &str, created_at: i64) -> RecommendationItem {
+    RecommendationItem {
+        article_id,
+        title: title.to_string(),
+        url: Some(format!("https://example.com/articles/{article_id}")),
+        feed_id: 1,
+        feed_title: "A".to_string(),
+        note: Some(format!("{title} 的推荐语")),
+        created_at,
     }
 }
 
@@ -245,4 +274,102 @@ fn article_and_feed_navigation_step_and_clamp() {
     assert!(model.prev_feed(&data));
     assert_eq!(model.selected_feed, Some(1));
     assert_eq!(model.selected_article, Some(10));
+}
+
+/// “我的推荐”是独立 section：切换进来不改变订阅选中，j/k 在推荐列表内移动。
+#[test]
+fn recommendations_section_lists_and_navigates_its_own_items() {
+    let data = FakeData::with(
+        vec![feed(1, "A", 2, 2), feed(2, "B", 1, 1)],
+        vec![
+            (
+                1,
+                vec![article(10, 1, "A1", true), article(11, 1, "A2", true)],
+            ),
+            (2, vec![article(20, 2, "B1", true)]),
+        ],
+    )
+    .with_recommendations(vec![
+        recommendation(11, "A2", 2_000),
+        recommendation(20, "B1", 1_000),
+    ]);
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+
+    assert_eq!(model.section, ShellSection::Feed);
+    assert_eq!(model.recommendations.len(), 2);
+    assert_eq!(model.selected_feed, Some(1));
+    assert_eq!(model.selected_article, Some(10));
+
+    assert!(model.show_recommendations(&data));
+    assert_eq!(model.section, ShellSection::Recommendations);
+    assert_eq!(model.status_line(), "我的推荐 · 2 篇");
+    // 切到推荐栏不改变订阅列表的选中项，也不自动打开文章。
+    assert_eq!(model.selected_feed, Some(1));
+    assert_eq!(model.selected_article, Some(10));
+    assert_eq!(model.selected_recommendation, None);
+
+    assert!(model.select_recommendation(11));
+    assert_eq!(
+        model
+            .selected_recommendation_item()
+            .map(|item| item.title.as_str()),
+        Some("A2")
+    );
+    assert!(model.next_article());
+    assert_eq!(model.selected_recommendation, Some(20));
+    assert!(!model.next_article(), "最后一条推荐不应越界");
+    assert!(model.prev_article());
+    assert_eq!(model.selected_recommendation, Some(11));
+    assert_eq!(
+        model.selected_article_item().map(|article| article.id),
+        Some(10),
+        "推荐栏里的 j/k 不应改动订阅文章选中项"
+    );
+
+    // 回到订阅：文章列表选中项原样保留。
+    assert!(model.select_feed(1, &data));
+    assert_eq!(model.section, ShellSection::Feed);
+    assert_eq!(model.selected_article, Some(10));
+}
+
+/// 推荐被撤回后刷新列表：选中项消失时清空，不留下悬空 id。
+#[test]
+fn reload_drops_a_removed_recommendation_from_selection() {
+    let data = FakeData::with(
+        vec![feed(1, "A", 1, 1)],
+        vec![(1, vec![article(10, 1, "A1", true)])],
+    )
+    .with_recommendations(vec![
+        recommendation(10, "A1", 2_000),
+        recommendation(11, "A2", 1_000),
+    ]);
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+    model.show_recommendations(&data);
+    model.select_recommendation(10);
+    assert_eq!(model.selected_recommendation, Some(10));
+
+    let after_removal = data.with_recommendations(vec![recommendation(11, "A2", 1_000)]);
+    assert!(model.reload(&after_removal));
+    assert_eq!(model.recommendations.len(), 1);
+    assert_eq!(model.selected_recommendation, None);
+}
+
+/// 推荐列表的读取失败与订阅失败互相隔离。
+#[test]
+fn recommendation_error_does_not_clear_feeds_or_articles() {
+    let mut data = FakeData::with(
+        vec![feed(1, "A", 1, 1)],
+        vec![(1, vec![article(10, 1, "A1", true)])],
+    );
+    data.recommendations = Some(Err("推荐表损坏".to_string()));
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+
+    assert_eq!(model.feeds.len(), 1);
+    assert_eq!(model.articles.len(), 1);
+    assert!(model.recommendations.is_empty());
+    assert!(model.recommendations_error.is_some());
+    assert!(model.feeds_error.is_none());
 }

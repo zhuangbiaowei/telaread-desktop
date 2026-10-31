@@ -31,13 +31,16 @@ use tela_net::{
 };
 use tela_proto::{
     ArticleRow, DEFAULT_HORIZON_DAYS, DEFAULT_SYNC_TYPES, FeedRow, Me, Meta, PrefRow,
-    ReadRuleInput, Removed, SiteRow, StateRow, StoreStage, SubscriptionRow, SyncResponse, SyncRows,
-    TelaError, TitleRow, Usage, is_read, now_ms,
+    ReadRuleInput, RecommendationRow, Removed, SiteRow, StateRow, StoreStage, SubscriptionRow,
+    SyncResponse, SyncRows, TelaError, TitleRow, Usage, is_read, now_ms,
 };
 use tela_store::Store;
 use tela_sync::{PullError, PullOptions, SyncEngine, SyncReport, SyncStatus};
 use tela_ui::account::{AccountMode, AccountService, AccountStatus, LoginTicket};
-use tela_ui::shell::{ArticleItem, FeedItem, OfflineCacheService, ShellData};
+use tela_ui::shell::{
+    ArticleItem, FeedItem, OfflineCacheService, RecommendationItem, RecommendationService,
+    ShellData,
+};
 
 use crate::content_cache::CachingContentApi;
 
@@ -647,6 +650,92 @@ impl AppServices {
         self.sync_once().map(|_| ()).map_err(|error| error.source)
     }
 
+    // ---- 推荐 ----
+
+    /// 推荐一篇文章（本地乐观更新 + 离线队列）。
+    ///
+    /// 语义与网页一致：再次推荐同一篇是更新推荐语；`None`/空白表示不带推荐语。
+    /// 已推荐时保留原来的 `createdAt`，与引擎的「推荐时间取第一次推荐」一致。
+    pub fn recommend(&self, article_id: i64, note: Option<String>) -> Result<(), TelaError> {
+        self.require_write("推荐")?;
+        let note = note
+            .map(|note| note.trim().to_string())
+            .filter(|note| !note.is_empty());
+        let mutation = tela_proto::Mutation::recommend(article_id, note.clone());
+        tela_proto::validate_push(std::slice::from_ref(&mutation))?;
+
+        let mut store = self.lock_store()?;
+        let key = article_id.to_string();
+        if store.get_row("articles", &key)?.is_none() {
+            return Err(TelaError::Content {
+                article: article_id,
+                content_key: key,
+                detail: "本地库没有这篇文章；先同步再推荐".into(),
+            });
+        }
+        let existing: Option<RecommendationRow> = store.get_as("recommendations", &key)?;
+        let created_at = existing
+            .as_ref()
+            .filter(|row| row.deleted_at.is_none())
+            .map(|row| row.created_at)
+            .unwrap_or_else(now_ms);
+        let row = RecommendationRow {
+            article_id,
+            note,
+            created_at,
+            deleted_at: None,
+        };
+        let body = serde_json::to_string(&row).map_err(|error| TelaError::Config {
+            detail: format!("推荐行无法序列化：{error}"),
+        })?;
+        store.upsert_row("recommendations", &key, &body)?;
+        store.enqueue_mutation(&mutation)?;
+        Ok(())
+    }
+
+    /// 撤回推荐（本地乐观更新 + 离线队列）；本来就没推荐时也返回成功。
+    pub fn unrecommend(&self, article_id: i64) -> Result<(), TelaError> {
+        self.require_write("取消推荐")?;
+        let mutation = tela_proto::Mutation::unrecommend(article_id);
+        tela_proto::validate_push(std::slice::from_ref(&mutation))?;
+
+        let mut store = self.lock_store()?;
+        let key = article_id.to_string();
+        if let Some(mut row) = store.get_as::<RecommendationRow>("recommendations", &key)?
+            && row.deleted_at.is_none()
+        {
+            row.deleted_at = Some(now_ms());
+            let body = serde_json::to_string(&row).map_err(|error| TelaError::Config {
+                detail: format!("推荐行无法序列化：{error}"),
+            })?;
+            store.upsert_row("recommendations", &key, &body)?;
+        }
+        store.enqueue_mutation(&mutation)?;
+        Ok(())
+    }
+
+    /// 写操作的前置检查：已登录、且令牌带 `write`。
+    fn require_write(&self, action: &str) -> Result<(), TelaError> {
+        let auth = self.auth.as_ref().ok_or_else(|| TelaError::NotLoggedIn {
+            detail: format!("{action}需要登录 Tela"),
+        })?;
+        if !auth.is_connected() {
+            return Err(TelaError::NotLoggedIn {
+                detail: format!("本地没有可用的 Tela 凭据，无法{action}"),
+            });
+        }
+        if auth.scope().as_deref() != Some("write") {
+            return Err(TelaError::Api {
+                ctx: tela_proto::WireContext::new("local", action),
+                status: 403,
+                code: "insufficient_scope".into(),
+                detail: format!("当前令牌是 read；重新登录并保留 write 权限后才能{action}"),
+                retry_after: None,
+            });
+        }
+        Ok(())
+    }
+
     // ---- 同步 ----
 
     /// 推完再拉（阻塞）。
@@ -823,6 +912,81 @@ impl AppServices {
             .collect())
     }
 
+    /// 成员当前有效的公开推荐（只读本地库），按推荐时间倒序。
+    ///
+    /// 推荐行由同步下发（`rows.recommendations`）；标题同样优先取当前语言译文，
+    /// 博客名按 feed → site 的顺序回退。已撤回（`deletedAt` 非空）的行不展示。
+    pub fn list_recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
+        let store = self.lock_store()?;
+        let mut rows: Vec<RecommendationRow> = store.rows_as("recommendations")?;
+        rows.retain(|row| row.deleted_at.is_none());
+        rows.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.article_id.cmp(&left.article_id))
+        });
+
+        let articles: Vec<ArticleRow> = store.rows_as("articles")?;
+        let feeds: Vec<FeedRow> = store.rows_as("feeds")?;
+        let sites: Vec<SiteRow> = store.rows_as("sites")?;
+        let titles: Vec<TitleRow> = store.rows_as("titles")?;
+
+        let article_by_id: HashMap<i64, ArticleRow> = articles
+            .into_iter()
+            .map(|article| (article.id, article))
+            .collect();
+        let feed_by_id: HashMap<i64, FeedRow> =
+            feeds.into_iter().map(|feed| (feed.id, feed)).collect();
+        let site_by_id: HashMap<i64, SiteRow> =
+            sites.into_iter().map(|site| (site.id, site)).collect();
+        let title_by_article: HashMap<i64, TitleRow> = titles
+            .into_iter()
+            .filter(|title| title.lang == self.lang)
+            .map(|title| (title.article_id, title))
+            .collect();
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let article = article_by_id.get(&row.article_id);
+                let feed = article.and_then(|article| feed_by_id.get(&article.feed_id));
+                let site = feed.and_then(|feed| site_by_id.get(&feed.site_id));
+                let feed_title = feed
+                    .and_then(|feed| feed.title.clone())
+                    .or_else(|| site.and_then(|site| site.title.clone()))
+                    .or_else(|| feed.map(|feed| feed.feed_url.clone()))
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or_else(|| "未知博客".to_string());
+                let title = title_by_article
+                    .get(&row.article_id)
+                    .and_then(|title| title.title.clone())
+                    .or_else(|| article.map(|article| article.title.clone()))
+                    .unwrap_or_else(|| format!("文章 {}", row.article_id));
+                RecommendationItem {
+                    article_id: row.article_id,
+                    title,
+                    url: article.and_then(|article| article.url.clone()),
+                    feed_id: article.map(|article| article.feed_id).unwrap_or_default(),
+                    feed_title,
+                    note: row.note,
+                    created_at: row.created_at,
+                }
+            })
+            .collect())
+    }
+
+    /// 一篇文章的推荐（未推荐时为 `None`）。
+    pub fn recommendation_for(
+        &self,
+        article_id: i64,
+    ) -> Result<Option<RecommendationItem>, TelaError> {
+        Ok(self
+            .list_recommendations()?
+            .into_iter()
+            .find(|item| item.article_id == article_id))
+    }
+
     /// 某篇文章的正文请求。
     pub fn chapter_request_for(&self, article_id: i64) -> Result<ChapterRequest, TelaError> {
         let store = self.lock_store()?;
@@ -924,6 +1088,24 @@ impl ShellData for AppServices {
 
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError> {
         self.chapter_request_for(article_id)
+    }
+
+    fn recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
+        self.list_recommendations()
+    }
+
+    fn recommendation(&self, article_id: i64) -> Result<Option<RecommendationItem>, TelaError> {
+        self.recommendation_for(article_id)
+    }
+}
+
+impl RecommendationService for AppServices {
+    fn recommend(&self, article_id: i64, note: Option<String>) -> Result<(), TelaError> {
+        AppServices::recommend(self, article_id, note)
+    }
+
+    fn unrecommend(&self, article_id: i64) -> Result<(), TelaError> {
+        AppServices::unrecommend(self, article_id)
     }
 }
 
@@ -1089,6 +1271,12 @@ fn demo_sync(lang: &str) -> SyncResponse {
                 marked_unread: false,
                 liked_at: None,
             }],
+            recommendations: vec![RecommendationRow {
+                article_id: DEMO_ARTICLE_NORMAL,
+                note: Some("演示：一篇适合第一次打开 Tela 的文章。".to_string()),
+                created_at: now,
+                deleted_at: None,
+            }],
             ..SyncRows::default()
         },
     }
@@ -1168,6 +1356,7 @@ fn auto_mark_read_enabled(prefs: &[PrefRow]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tela_net::StoredCredential;
 
     fn pref(key: &str, value: serde_json::Value) -> PrefRow {
         PrefRow {
@@ -1175,6 +1364,115 @@ mod tests {
             value,
             updated_at: 0,
         }
+    }
+
+    /// 演示数据 + 一个指定 scope 的本地凭据会话，用来测写路径。
+    fn services_with_scope(scope: &str) -> AppServices {
+        let content: Arc<dyn ContentApi> = Arc::from(mock_content_api());
+        let mut services =
+            AppServices::open_in_memory("zh-Hans", content, Arc::new(MockTransport::new()))
+                .expect("open in-memory services");
+        services.seed_demo().expect("seed demo");
+        let store = Arc::new(MemoryTokenStore::new());
+        store
+            .save(
+                "default",
+                &StoredCredential {
+                    refresh_token: "tela_rt_test".to_string(),
+                    scope: scope.to_string(),
+                    handle: Some("tester".to_string()),
+                },
+            )
+            .expect("save test credential");
+        let auth = Arc::new(
+            AuthSession::load(AuthConfig::new("tela_app_test"), store).expect("load auth session"),
+        );
+        services.auth = Some(auth);
+        services
+    }
+
+    #[test]
+    fn recommendation_write_is_local_first_and_queued() {
+        let services = services_with_scope("write");
+        assert_eq!(services.list_recommendations().unwrap().len(), 1);
+
+        // 超长推荐语在本地就被拒绝：不改行、不入队。
+        let too_long = "字".repeat(tela_proto::MAX_RECOMMENDATION_NOTE + 1);
+        let error = services
+            .recommend(DEMO_ARTICLE_READ, Some(too_long))
+            .unwrap_err();
+        assert!(
+            matches!(error, TelaError::InvalidMutation { .. }),
+            "{error:?}"
+        );
+        assert_eq!(services.list_recommendations().unwrap().len(), 1);
+        assert_eq!(services.pending_count().unwrap(), 0);
+
+        // 推荐：本地行立即出现、推荐语去掉首尾空白、入队一条。
+        services
+            .recommend(DEMO_ARTICLE_READ, Some("  推荐理由  ".into()))
+            .expect("recommend");
+        let recommendations = services.list_recommendations().unwrap();
+        assert_eq!(recommendations.len(), 2);
+        let added = recommendations
+            .iter()
+            .find(|item| item.article_id == DEMO_ARTICLE_READ)
+            .expect("新推荐应在列表里");
+        assert_eq!(added.note.as_deref(), Some("推荐理由"));
+        assert!(added.created_at > 0);
+        let created_at = added.created_at;
+        assert_eq!(services.pending_count().unwrap(), 1);
+
+        // 更新推荐语：保留第一次推荐时间，只改 note。
+        services
+            .recommend(DEMO_ARTICLE_READ, None)
+            .expect("update recommendation");
+        let edited = services
+            .recommendation_for(DEMO_ARTICLE_READ)
+            .unwrap()
+            .expect("推荐仍在");
+        assert_eq!(edited.note, None);
+        assert_eq!(edited.created_at, created_at);
+        assert_eq!(services.pending_count().unwrap(), 2);
+
+        // 撤回：本地行消失，并再入队一条。
+        services
+            .unrecommend(DEMO_ARTICLE_READ)
+            .expect("unrecommend");
+        assert!(
+            services
+                .recommendation_for(DEMO_ARTICLE_READ)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(services.list_recommendations().unwrap().len(), 1);
+        assert_eq!(services.pending_count().unwrap(), 3);
+    }
+
+    #[test]
+    fn recommendation_write_requires_write_scope() {
+        let services = services_with_scope("read");
+        let error = services
+            .recommend(DEMO_ARTICLE_READ, Some("只读令牌".into()))
+            .expect_err("read 令牌不能写推荐");
+        assert!(
+            matches!(
+                &error,
+                TelaError::Api {
+                    status: 403,
+                    code,
+                    ..
+                } if code == "insufficient_scope"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            services
+                .recommendation_for(DEMO_ARTICLE_READ)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(services.pending_count().unwrap(), 0);
     }
 
     #[test]

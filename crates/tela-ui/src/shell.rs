@@ -53,6 +53,32 @@ impl ArticleItem {
     }
 }
 
+/// “我的推荐”里的一条：成员公开推荐的一篇文章。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecommendationItem {
+    /// 文章 id。
+    pub article_id: i64,
+    /// 文章标题（优先当前语言译文）。
+    pub title: String,
+    /// 原文地址；缺失时阅读面板不显示“打开原文”。
+    pub url: Option<String>,
+    /// 所属 feed id。
+    pub feed_id: i64,
+    /// 博客展示名（feed 标题优先，缺失时回退到站点/地址）。
+    pub feed_title: String,
+    /// 推荐语；可空。
+    pub note: Option<String>,
+    /// 推荐时间（epoch 毫秒）。
+    pub created_at: i64,
+}
+
+impl RecommendationItem {
+    /// 列表里展示的推荐日期（UTC）。
+    pub fn created_label(&self) -> String {
+        format_published_at(self.created_at)
+    }
+}
+
 /// epoch 时间 → `YYYY-MM-DD`。
 ///
 /// v1 wire 的 `publishedAt` 是毫秒，但历史 fixture 和演示数据里也出现过秒；
@@ -96,6 +122,34 @@ pub trait ShellData: Send + Sync {
 
     /// 某篇文章对应的正文请求（正文 key + 目标语言）。
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError>;
+
+    /// 成员当前有效的公开推荐，按推荐时间倒序。
+    ///
+    /// 默认实现返回空列表：只读测试/嵌入方不必知道推荐功能；
+    /// 真实装配由 `tela-app` 从本地库的 `recommendations` 行构造。
+    fn recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
+        Ok(Vec::new())
+    }
+
+    /// 某一篇文章是否已被成员推荐；未推荐时返回 `None`。
+    fn recommendation(&self, article_id: i64) -> Result<Option<RecommendationItem>, TelaError> {
+        Ok(self
+            .recommendations()?
+            .into_iter()
+            .find(|item| item.article_id == article_id))
+    }
+}
+
+/// 推荐写能力：供阅读面板的“推荐”按钮与推荐列表的“取消推荐”调用。
+///
+/// 实现方先做本地乐观更新（写本地库并入离线队列），再由外壳触发同步；
+/// 网络失败不影响界面，队列会在下一次同步时原样重发。
+pub trait RecommendationService: Send + Sync {
+    /// 推荐一篇文章；`note` 为空表示不带推荐语。已推荐时表示更新推荐语。
+    fn recommend(&self, article_id: i64, note: Option<String>) -> Result<(), TelaError>;
+
+    /// 撤回一篇文章的推荐（未推荐时也视为成功）。
+    fn unrecommend(&self, article_id: i64) -> Result<(), TelaError>;
 }
 
 /// 订阅级离线缓存进度（左侧博客名旁的按钮显示它）。
@@ -214,6 +268,16 @@ pub trait OfflineCacheService: Send + Sync {
     ) -> Result<OfflineCacheReport, TelaError>;
 }
 
+/// 中间栏当前显示哪个列表。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShellSection {
+    /// 当前订阅的文章列表（默认）。
+    #[default]
+    Feed,
+    /// 成员自己的推荐列表。
+    Recommendations,
+}
+
 /// 三栏外壳的当前状态。
 ///
 /// 约定：
@@ -227,14 +291,22 @@ pub struct ShellViewModel {
     pub feeds: Vec<FeedItem>,
     /// 当前 feed 的文章列表。
     pub articles: Vec<ArticleItem>,
-    /// 当前选中的 feed。
+    /// 当前 feed 的选中项。
     pub selected_feed: Option<i64>,
-    /// 当前选中的文章。
+    /// 当前 feed 文章列表的选中项。
     pub selected_article: Option<i64>,
     /// 订阅列表加载错误（展示在左侧空态/错误区）。
     pub feeds_error: Option<String>,
     /// 文章列表加载错误（展示在中间空态/错误区）。
     pub articles_error: Option<String>,
+    /// 中间栏当前是订阅文章还是“我的推荐”。
+    pub section: ShellSection,
+    /// 我的推荐（只含未撤回的项，按推荐时间倒序）。
+    pub recommendations: Vec<RecommendationItem>,
+    /// 推荐列表的选中项。
+    pub selected_recommendation: Option<i64>,
+    /// 推荐列表加载错误。
+    pub recommendations_error: Option<String>,
 }
 
 impl ShellViewModel {
@@ -269,18 +341,46 @@ impl ShellViewModel {
                 self.articles_error = None;
             }
         }
+        self.reload_recommendations(data);
         *self != before
     }
 
-    /// 选中一个订阅；id 不在列表里时忽略并返回 `false`。
+    /// 选中一个订阅并回到文章列表；id 不在列表里时忽略并返回 `false`。
     pub fn select_feed(&mut self, feed_id: i64, data: &dyn ShellData) -> bool {
-        if self.selected_feed == Some(feed_id) || !self.feeds.iter().any(|feed| feed.id == feed_id)
+        if !self.feeds.iter().any(|feed| feed.id == feed_id) {
+            return false;
+        }
+        let mut changed = self.section != ShellSection::Feed;
+        self.section = ShellSection::Feed;
+        if self.selected_feed != Some(feed_id) {
+            self.selected_feed = Some(feed_id);
+            self.selected_article = None;
+            self.reload_articles(data);
+            changed = true;
+        }
+        changed
+    }
+
+    /// 打开“我的推荐”列表；返回视图是否需要重绘。
+    pub fn show_recommendations(&mut self, data: &dyn ShellData) -> bool {
+        let mut changed = self.section != ShellSection::Recommendations;
+        self.section = ShellSection::Recommendations;
+        changed |= self.reload_recommendations(data);
+        changed
+    }
+
+    /// 选中一条推荐；文章不在推荐列表里时忽略。
+    pub fn select_recommendation(&mut self, article_id: i64) -> bool {
+        if self.selected_recommendation == Some(article_id)
+            || !self
+                .recommendations
+                .iter()
+                .any(|item| item.article_id == article_id)
         {
             return false;
         }
-        self.selected_feed = Some(feed_id);
-        self.selected_article = None;
-        self.reload_articles(data);
+        self.section = ShellSection::Recommendations;
+        self.selected_recommendation = Some(article_id);
         true
     }
 
@@ -295,14 +395,20 @@ impl ShellViewModel {
         true
     }
 
-    /// 下一篇（`j`）：到文章列表末尾停住，不跨订阅。
+    /// 下一篇（`j`）：到当前列表末尾停住，不跨订阅/不跳回订阅列表。
     pub fn next_article(&mut self) -> bool {
-        self.step_article(1)
+        match self.section {
+            ShellSection::Feed => self.step_article(1),
+            ShellSection::Recommendations => self.step_recommendation(1),
+        }
     }
 
-    /// 上一篇（`k`）：到文章列表开头停住，不跨订阅。
+    /// 上一篇（`k`）：到当前列表开头停住。
     pub fn prev_article(&mut self) -> bool {
-        self.step_article(-1)
+        match self.section {
+            ShellSection::Feed => self.step_article(-1),
+            ShellSection::Recommendations => self.step_recommendation(-1),
+        }
     }
 
     /// 下一个博客（`Shift+J`）：切换订阅并加载它的第一篇文章。
@@ -332,6 +438,28 @@ impl ShellViewModel {
             return false;
         }
         self.selected_article = Some(self.articles[target].id);
+        true
+    }
+
+    fn step_recommendation(&mut self, delta: isize) -> bool {
+        if self.recommendations.is_empty() {
+            return false;
+        }
+        let current = self.selected_recommendation.and_then(|id| {
+            self.recommendations
+                .iter()
+                .position(|item| item.article_id == id)
+        });
+        let target = match current {
+            Some(index) => index.saturating_add_signed(delta),
+            None if delta > 0 => 0,
+            None => self.recommendations.len() - 1,
+        }
+        .min(self.recommendations.len() - 1);
+        if Some(target) == current {
+            return false;
+        }
+        self.selected_recommendation = Some(self.recommendations[target].article_id);
         true
     }
 
@@ -367,6 +495,14 @@ impl ShellViewModel {
         self.articles.iter().find(|article| article.id == id)
     }
 
+    /// 当前选中的推荐项。
+    pub fn selected_recommendation_item(&self) -> Option<&RecommendationItem> {
+        let id = self.selected_recommendation?;
+        self.recommendations
+            .iter()
+            .find(|item| item.article_id == id)
+    }
+
     /// 全部订阅的未读总数。
     pub fn unread_total(&self) -> usize {
         self.feeds.iter().map(|feed| feed.unread).sum()
@@ -379,6 +515,9 @@ impl ShellViewModel {
 
     /// 顶部状态栏文案。
     pub fn status_line(&self) -> String {
+        if self.section == ShellSection::Recommendations {
+            return format!("我的推荐 · {} 篇", self.recommendations.len());
+        }
         if let Some(error) = &self.feeds_error {
             return format!("订阅列表加载失败：{error}");
         }
@@ -416,6 +555,37 @@ impl ShellViewModel {
                 self.articles_error = Some(error.to_string());
             }
         }
+    }
+
+    /// 从数据源刷新“我的推荐”，并保留仍然存在的选中项。
+    fn reload_recommendations(&mut self, data: &dyn ShellData) -> bool {
+        let before = (
+            self.recommendations.clone(),
+            self.selected_recommendation,
+            self.recommendations_error.clone(),
+        );
+        match data.recommendations() {
+            Ok(recommendations) => {
+                self.recommendations = recommendations;
+                self.recommendations_error = None;
+                self.selected_recommendation = self.selected_recommendation.filter(|id| {
+                    self.recommendations
+                        .iter()
+                        .any(|item| item.article_id == *id)
+                });
+            }
+            Err(error) => {
+                self.recommendations.clear();
+                self.selected_recommendation = None;
+                self.recommendations_error = Some(error.to_string());
+            }
+        }
+        before
+            != (
+                self.recommendations.clone(),
+                self.selected_recommendation,
+                self.recommendations_error.clone(),
+            )
     }
 }
 

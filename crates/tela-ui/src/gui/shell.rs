@@ -11,10 +11,10 @@ use tela_content::api::ContentApi;
 use tela_proto::TelaError;
 
 use crate::account::{AccountMode, AccountService, AccountStatus, LoginPhase, LoginTicket};
-use crate::gui::reader::ReaderView;
+use crate::gui::reader::{ReaderEvent, ReaderView};
 use crate::shell::{
     ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService,
-    ShellData, ShellViewModel,
+    RecommendationItem, RecommendationService, ShellData, ShellSection, ShellViewModel,
 };
 
 use gpui_kit::base::{h_flex, v_flex};
@@ -60,6 +60,12 @@ pub struct ShellView {
     cache_notice: Option<String>,
     /// 后台缓存任务与进度轮询任务，必须保活。
     cache_tasks: Vec<Task<()>>,
+    /// 推荐写能力；测试/只读装配可以为空（推荐按钮不显示）。
+    recommendations: Option<Arc<dyn RecommendationService>>,
+    /// 推荐列表上的一句提示（完成/失败）。
+    recommend_notice: Option<String>,
+    /// 阅读面板的推荐事件订阅；必须保活。
+    _reader_subscription: Subscription,
 }
 
 impl ShellView {
@@ -90,13 +96,39 @@ impl ShellView {
         offline_cache: Option<Arc<dyn OfflineCacheService>>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let reader = cx.new(|cx| ReaderView::new(data.clone(), content.clone(), cx));
+        Self::new_with_recommendations(data, content, accounts, offline_cache, None, cx)
+    }
+
+    /// 完整装配：账号、离线缓存与推荐写能力。
+    pub fn new_with_recommendations(
+        data: Arc<dyn ShellData>,
+        content: Arc<dyn ContentApi>,
+        accounts: Option<Arc<dyn AccountService>>,
+        offline_cache: Option<Arc<dyn OfflineCacheService>>,
+        recommendations: Option<Arc<dyn RecommendationService>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let reader = cx.new(|cx| {
+            ReaderView::new_with_recommendations(
+                data.clone(),
+                content.clone(),
+                recommendations.clone(),
+                cx,
+            )
+        });
         let mut model = ShellViewModel::new();
         model.reload(data.as_ref());
         let account = accounts
             .as_ref()
             .map(|accounts| accounts.status())
             .unwrap_or_default();
+        let _reader_subscription =
+            cx.subscribe(&reader, |this, _reader, _event: &ReaderEvent, cx| {
+                // 阅读面板已经在本地写入了推荐行；外壳只负责刷新列表与补一次同步。
+                this.reload(cx);
+                this.schedule_sync(cx);
+                cx.notify();
+            });
         let mut view = Self {
             data,
             content,
@@ -116,6 +148,9 @@ impl ShellView {
             cache_progress: HashMap::new(),
             cache_notice: None,
             cache_tasks: Vec::new(),
+            recommendations,
+            recommend_notice: None,
+            _reader_subscription,
         };
         view.sync_reader(cx);
         view
@@ -310,6 +345,7 @@ impl ShellView {
     pub fn select_feed(&mut self, feed_id: i64, cx: &mut Context<Self>) -> bool {
         let changed = self.model.select_feed(feed_id, self.data.as_ref());
         if changed {
+            self.recommend_notice = None;
             self.sync_reader(cx);
             // 切订阅会显示该订阅的第一篇，视同打开。
             if let Some(article_id) = self.model.selected_article {
@@ -317,6 +353,57 @@ impl ShellView {
             }
         }
         changed
+    }
+
+    /// 打开“我的推荐”栏；返回是否发生变化。
+    pub fn show_recommendations(&mut self, cx: &mut Context<Self>) -> bool {
+        let changed = self.model.show_recommendations(self.data.as_ref());
+        if changed {
+            self.recommend_notice = None;
+            // 回到推荐栏时，如果之前选过一条，就把阅读面板切回那篇；
+            // 没选过则保持当前阅读内容，不自动打开推荐（避免误标已读）。
+            self.sync_reader(cx);
+            cx.notify();
+        }
+        changed
+    }
+
+    /// 选中一条推荐并交给阅读面板；返回是否发生变化。
+    pub fn select_recommendation(&mut self, article_id: i64, cx: &mut Context<Self>) -> bool {
+        let changed = self.model.select_recommendation(article_id);
+        if changed {
+            self.sync_reader(cx);
+        }
+        let marked = self.mark_read_if_needed(article_id, cx);
+        changed || marked
+    }
+
+    /// 从推荐列表撤回一条推荐；本地立即生效，后台补一次同步。
+    pub fn cancel_recommendation(&mut self, article_id: i64, cx: &mut Context<Self>) {
+        let Some(service) = self.recommendations.clone() else {
+            self.recommend_notice = Some("当前装配不支持推荐".to_string());
+            cx.notify();
+            return;
+        };
+        match service.unrecommend(article_id) {
+            Ok(()) => {
+                self.model.reload(self.data.as_ref());
+                self.reader.update(cx, |reader, cx| {
+                    reader.refresh_recommendation(cx);
+                });
+                self.recommend_notice = Some("已取消推荐。".to_string());
+                self.schedule_sync(cx);
+            }
+            Err(error) => {
+                self.recommend_notice = Some(format!("取消推荐失败：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 最近一次推荐操作的结果提示（测试/诊断用）。
+    pub fn recommend_notice(&self) -> Option<&str> {
+        self.recommend_notice.as_deref()
     }
 
     /// 选中文章；返回是否发生变化。
@@ -383,6 +470,10 @@ impl ShellView {
     /// 阅读面板自己处理 `o/c/t/n/p/PageUp/PageDown`；这里只接管需要改
     /// 选中项的键，事件从阅读面板冒泡上来后调用。
     pub fn handle_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
+        // 推荐弹窗是模态的：输入推荐语时外壳不应抢 j/k。
+        if self.reader.read(cx).recommend_dialog_open() {
+            return false;
+        }
         match (key.to_ascii_lowercase().as_str(), shift) {
             ("j", false) => self.next_article(cx),
             ("k", false) => self.prev_article(cx),
@@ -397,16 +488,29 @@ impl ShellView {
         let changed = self.model.reload(self.data.as_ref());
         if changed {
             self.sync_reader(cx);
+            // 同步/登录切换后，当前文章的“已推荐”标记也要跟着本地行更新。
+            self.reader.update(cx, |reader, cx| {
+                reader.refresh_recommendation(cx);
+            });
         }
         changed
     }
 
     /// 把当前选中的文章交给阅读面板；同一篇重复调用由阅读面板自己忽略。
     fn sync_reader(&mut self, cx: &mut Context<Self>) {
-        if let Some(article) = self.model.selected_article_item().cloned() {
-            self.reader.update(cx, |reader, cx| {
-                reader.select(article.id, article.title, article.url, cx)
-            });
+        let selection = match self.model.section {
+            ShellSection::Feed => self
+                .model
+                .selected_article_item()
+                .map(|article| (article.id, article.title.clone(), article.url.clone())),
+            ShellSection::Recommendations => self
+                .model
+                .selected_recommendation_item()
+                .map(|item| (item.article_id, item.title.clone(), item.url.clone())),
+        };
+        if let Some((article_id, title, url)) = selection {
+            self.reader
+                .update(cx, |reader, cx| reader.select(article_id, title, url, cx));
         }
     }
 
@@ -460,7 +564,7 @@ impl ShellView {
                 }
                 view.sync_in_flight = false;
                 if let Err(error) = result {
-                    view.account_notice = Some(format!("已读状态已入队，但同步失败：{error}"));
+                    view.account_notice = Some(format!("本地变更已入队，但同步失败：{error}"));
                 }
                 view.reload(cx);
                 if view.sync_again {
@@ -836,6 +940,7 @@ impl ShellView {
                         element.child(div().text_xs().text_color(rgb(MUTED)).child(notice))
                     }),
             )
+            .child(self.recommendations_entry(cx))
             .child(self.feed_list(cx))
             .child(
                 v_flex()
@@ -849,6 +954,51 @@ impl ShellView {
                         model.unread_total()
                     )))
                     .child(self.account_panel(cx)),
+            )
+    }
+
+    /// 侧栏的“我的推荐”入口：显示全部推荐过的文章数量。
+    fn recommendations_entry(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.model.section == ShellSection::Recommendations;
+        let count = self.model.recommendations.len();
+        h_flex()
+            .id("sidebar-recommendations")
+            .role(Role::Button)
+            .aria_label(format!("我的推荐，{count} 篇"))
+            .mx_2()
+            .mt_2()
+            .mb_1()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .rounded_md()
+            .cursor_pointer()
+            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(!selected, |element| {
+                element.hover(|style| style.bg(rgb(PANEL)))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.show_recommendations(cx) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .child("我的推荐"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                    .child(count.to_string()),
             )
     }
 
@@ -882,7 +1032,7 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let feed_id = feed.id;
-        let is_selected = selected == Some(feed.id);
+        let is_selected = self.model.section == ShellSection::Feed && selected == Some(feed.id);
         let cache_button = self.cache_button(feed, cx);
         v_flex()
             .id(("feed", feed.id as u64))
@@ -1001,29 +1151,35 @@ impl ShellView {
 
     fn main_panel(&self, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
-        if let Some(error) = &model.feeds_error {
-            return h_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .bg(rgb(BG))
-                .child(Self::full_page_error("无法加载订阅", error));
-        }
-        if model.is_empty() {
-            return h_flex()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .bg(rgb(BG))
-                .child(Self::full_page_empty());
+        if model.section == ShellSection::Feed {
+            if let Some(error) = &model.feeds_error {
+                return h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .bg(rgb(BG))
+                    .child(Self::full_page_error("无法加载订阅", error));
+            }
+            if model.is_empty() {
+                return h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .bg(rgb(BG))
+                    .child(Self::full_page_empty());
+            }
         }
 
+        let middle = match model.section {
+            ShellSection::Feed => self.article_pane(cx),
+            ShellSection::Recommendations => self.recommendation_pane(cx),
+        };
         h_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .bg(rgb(BG))
-            .child(self.article_pane(cx))
+            .child(middle)
             .child(self.reader_pane())
     }
 
@@ -1093,6 +1249,162 @@ impl ShellView {
                     ),
             )
             .child(list)
+    }
+
+    /// 中间栏的“我的推荐”列表：标题、博客、推荐日期、推荐语与取消按钮。
+    fn recommendation_pane(&self, cx: &mut Context<Self>) -> Div {
+        let model = &self.model;
+        let count = model.recommendations.len();
+
+        let mut list = v_flex()
+            .id("recommendation-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_2()
+            .gap_1();
+
+        if let Some(error) = &model.recommendations_error {
+            list = list.child(Self::inline_error("推荐列表加载失败", error));
+        } else if model.recommendations.is_empty() {
+            list = list.child(
+                v_flex()
+                    .p_4()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child("还没有推荐过文章"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("打开一篇文章，点右上角的「推荐」写下推荐理由。"),
+                    ),
+            );
+        } else {
+            for item in &model.recommendations {
+                list = list.child(self.recommendation_row(item, cx));
+            }
+        }
+
+        v_flex()
+            .w(px(360.))
+            .h_full()
+            .bg(rgb(PANEL))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                h_flex()
+                    .p_4()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("我的推荐"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(format!("{count} 篇")),
+                    ),
+            )
+            .when_some(self.recommend_notice.clone(), |element, notice| {
+                element.child(
+                    div()
+                        .px_4()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(rgb(SUBTLE))
+                        .child(notice),
+                )
+            })
+            .child(list)
+    }
+
+    fn recommendation_row(
+        &self,
+        item: &RecommendationItem,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let article_id = item.article_id;
+        let selected = self.model.section == ShellSection::Recommendations
+            && self.model.selected_recommendation == Some(article_id);
+        v_flex()
+            .id(("recommendation", article_id as u64))
+            .role(Role::Button)
+            .aria_label(item.title.clone())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .cursor_pointer()
+            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(!selected, |element| {
+                element.hover(|style| style.bg(rgb(SIDEBAR)))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.select_recommendation(article_id, cx) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(item.title.clone()),
+                    )
+                    .child(self.cancel_recommendation_button(article_id, cx)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(format!("{} · {}", item.feed_title, item.created_label())),
+            )
+            .when_some(item.note.clone(), |element, note| {
+                element.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(SUBTLE))
+                        .child(format!("“{note}”")),
+                )
+            })
+    }
+
+    /// 推荐行右侧的“取消推荐”按钮；阻止事件冒泡，避免顺带打开文章。
+    fn cancel_recommendation_button(&self, article_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(("recommendation-cancel", article_id as u64))
+            .role(Role::Button)
+            .aria_label("取消推荐")
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .text_color(rgb(DANGER))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.cancel_recommendation(article_id, cx);
+            }))
+            .child("取消")
+            .into_any_element()
     }
 
     fn article_row(

@@ -23,6 +23,7 @@ CLI 与本地库。GUI 的实时后台同步、Discover/Search、划线/文件�
 | 正文对象 | `GET /v1/bodies?keys=` | `tela-content::http::HttpContentApi` |
 | 翻译请求/状态/对象 | `/v1/translations`、`/o/t/…` | 同上 |
 | 接收方/读取方 | `/v1/me`、`/v1/usage` | `ApiClient::me/usage` |
+| 推荐 / 撤回推荐 | `POST /v1/mutations`（`recommend` / `unrecommend`） | `AppServices::recommend/unrecommend`；阅读面板推荐弹窗与「我的推荐」栏 |
 | 本地库 v4 | — | `tela-store`（schema v4）；`tela-app::content_cache` 负责正文/译文/图片缓存与离线预取 |
 | GUI 账号面板 | — | `tela-ui::account` + `ShellView`：登录/等待授权/复制链接/退出 |
 | CLI | — | `tela-app login/sync/list/read/mark-read/mark-unread/like/status/meta/demo` |

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -17,7 +18,8 @@ use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
 use tela_ui::shell::{
-    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService, ShellData,
+    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService,
+    RecommendationItem, RecommendationService, ShellData, ShellSection,
 };
 
 #[derive(Default)]
@@ -26,6 +28,8 @@ struct FakeData {
     articles: HashMap<i64, Vec<ArticleItem>>,
     /// 指定所有文章共用的正文 key；默认用 article id（多数测试只验证列表）。
     content_key: Option<String>,
+    /// 与 `FakeRecommender` 共享的推荐列表，模拟本地库的实时变化。
+    recommendations: Option<Arc<Mutex<Vec<RecommendationItem>>>>,
 }
 
 impl ShellData for FakeData {
@@ -44,6 +48,68 @@ impl ShellData for FakeData {
                 .unwrap_or_else(|| article_id.to_string()),
             "zh-Hans",
         ))
+    }
+
+    fn recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
+        Ok(self
+            .recommendations
+            .as_ref()
+            .map(|items| items.lock().map(|items| items.clone()).unwrap_or_default())
+            .unwrap_or_default())
+    }
+}
+
+/// 推荐服务的测试替身：记录调用并同步修改共享的推荐列表。
+type RecommendationCalls = Arc<Mutex<Vec<(i64, Option<String>)>>>;
+
+struct FakeRecommender {
+    items: Arc<Mutex<Vec<RecommendationItem>>>,
+    calls: RecommendationCalls,
+}
+
+impl RecommendationService for FakeRecommender {
+    fn recommend(&self, article_id: i64, note: Option<String>) -> Result<(), TelaError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push((article_id, note.clone()));
+        }
+        if let Ok(mut items) = self.items.lock() {
+            if let Some(item) = items.iter_mut().find(|item| item.article_id == article_id) {
+                item.note = note;
+            } else {
+                items.push(RecommendationItem {
+                    article_id,
+                    title: format!("文章 {article_id}"),
+                    url: Some(format!("https://example.com/articles/{article_id}")),
+                    feed_id: 1,
+                    feed_title: "示例博客".to_string(),
+                    note,
+                    created_at: 2_000,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn unrecommend(&self, article_id: i64) -> Result<(), TelaError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push((article_id, None));
+        }
+        if let Ok(mut items) = self.items.lock() {
+            items.retain(|item| item.article_id != article_id);
+        }
+        Ok(())
+    }
+}
+
+fn recommendation(article_id: i64, title: &str) -> RecommendationItem {
+    RecommendationItem {
+        article_id,
+        title: title.to_string(),
+        url: Some(format!("https://example.com/articles/{article_id}")),
+        feed_id: 1,
+        feed_title: "示例博客".to_string(),
+        note: Some("值得一读".to_string()),
+        created_at: 2_000,
     }
 }
 
@@ -184,6 +250,7 @@ fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
             (2, vec![article(20, 2, "B1"), article(21, 2, "B2")]),
         ]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        ..FakeData::default()
     });
     let data_for_view: Arc<dyn ShellData> = data;
     let (window, view) = open_window_sized(cx, size(px(900.), px(420.)), move |_, cx| {
@@ -353,6 +420,7 @@ fn cache_button_runs_prefetch_and_reports_progress(cx: &mut TestAppContext) {
             vec![article(42, 1, "Hello Tela"), article(43, 1, "长章节")],
         )]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        ..FakeData::default()
     });
     let data_for_view: Arc<dyn ShellData> = data;
     let cache: Arc<dyn OfflineCacheService> = Arc::new(FakeCache {
@@ -391,4 +459,161 @@ fn cache_button_runs_prefetch_and_reports_progress(cx: &mut TestAppContext) {
         view.read_with(cx, |view, _| view.model().selected_feed),
         Some(1)
     );
+}
+
+/// “我的推荐”栏：从侧栏切入、选中推荐打开文章、取消推荐后列表与界面同步。
+#[gpui::test]
+fn recommendations_pane_lists_opens_and_cancels(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(vec![
+        recommendation(42, "Hello Tela"),
+        recommendation(43, "长章节"),
+    ]));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 2, 2)],
+        articles: HashMap::from([(
+            1,
+            vec![article(42, 1, "Hello Tela"), article(43, 1, "长章节")],
+        )]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        recommendations: Some(Arc::clone(&items)),
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let recommender: Arc<dyn RecommendationService> = Arc::new(FakeRecommender {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_recommendations(
+                data_for_view,
+                content(),
+                None,
+                None,
+                Some(recommender),
+                cx,
+            )
+        })
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert_eq!(view.read(cx).model().recommendations.len(), 2);
+
+        let shown = view.update(cx, |view, cx| {
+            let changed = view.show_recommendations(cx);
+            cx.notify();
+            changed
+        });
+        assert!(shown);
+        window.draw(cx).clear(cx);
+        assert_eq!(view.read(cx).model().section, ShellSection::Recommendations);
+
+        let selected = view.update(cx, |view, cx| {
+            let changed = view.select_recommendation(42, cx);
+            cx.notify();
+            changed
+        });
+        assert!(selected);
+        assert_eq!(view.read(cx).reader().read(cx).article_id(), Some(42));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    view.update(cx, |view, cx| view.cancel_recommendation(42, cx));
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    assert_eq!(items.lock().unwrap().len(), 1);
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().recommendations.len()),
+        1
+    );
+    assert_eq!(
+        view.read_with(cx, |view, _| view.recommend_notice().map(str::to_string))
+            .as_deref(),
+        Some("已取消推荐。")
+    );
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[(42, None)],
+        "取消推荐只应产生一次写调用"
+    );
+}
+
+/// 阅读面板的推荐弹窗：空推荐语也能推荐；再次打开可取消推荐。
+#[gpui::test]
+fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 1, 1)],
+        articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        recommendations: Some(Arc::clone(&items)),
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let recommender: Arc<dyn RecommendationService> = Arc::new(FakeRecommender {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_recommendations(
+                data_for_view,
+                content(),
+                None,
+                None,
+                Some(recommender),
+                cx,
+            )
+        })
+    });
+    let reader = view.read_with(cx, |view, _| view.reader());
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        reader.update(cx, |reader, cx| {
+            reader.open_recommend_dialog(window, cx);
+            assert!(reader.recommend_dialog_open());
+        });
+        // 弹窗是模态的：t 不切视图、j 不换文章。
+        assert!(!reader.update(cx, |reader, cx| reader.handle_key("t", cx)));
+        assert!(!view.update(cx, |view, cx| view.handle_shortcut("j", false, cx)));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    reader.update(cx, |reader, cx| reader.submit_recommendation(cx));
+    assert_eq!(calls.lock().unwrap().as_slice(), &[(42, None)]);
+    assert!(cx.update(|cx| !reader.read(cx).recommend_dialog_open()));
+    assert!(cx.update(|cx| reader.read(cx).recommendation().is_some()));
+    assert_eq!(
+        cx.update(|cx| reader.read(cx).recommend_notice().map(str::to_string))
+            .as_deref(),
+        Some("已推荐。")
+    );
+
+    cx.update_window(window, |_, window, cx| {
+        reader.update(cx, |reader, cx| {
+            reader.open_recommend_dialog(window, cx);
+            assert!(reader.recommend_dialog_open(), "已推荐时应能编辑");
+        });
+    })
+    .unwrap();
+    reader.update(cx, |reader, cx| reader.confirm_unrecommend(cx));
+    assert!(cx.update(|cx| reader.read(cx).recommendation().is_none()));
+    assert!(items.lock().unwrap().is_empty());
+    assert_eq!(calls.lock().unwrap().as_slice(), &[(42, None), (42, None)]);
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
 }

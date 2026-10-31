@@ -10,6 +10,7 @@ use tela_content::api::ContentApi;
 use tela_content::mock::{MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MockContentApi};
 use tela_content::model::TranslationView;
 use tela_net::MockTransport;
+use tela_proto::TelaError;
 use tela_ui::account::AccountMode;
 use tela_ui::shell::ShellData;
 
@@ -197,4 +198,56 @@ fn demo_services_expose_account_mode_but_refuse_login() {
     assert_eq!(services.account_status().mode, AccountMode::Demo);
     assert!(!services.account_status().can_login());
     assert!(services.begin_login().is_err());
+}
+
+#[test]
+fn demo_seed_exposes_a_recommendation_through_shell_data() {
+    let services = demo_services();
+    let recommendations = services.list_recommendations().unwrap();
+    assert_eq!(recommendations.len(), 1);
+    let item = &recommendations[0];
+    assert_eq!(item.article_id, DEMO_ARTICLE_NORMAL);
+    assert_eq!(
+        item.title, "你好，Tela：完整对照",
+        "推荐列表标题取当前语言译文"
+    );
+    assert_eq!(item.feed_title, "Tela 示例博客");
+    assert!(
+        item.note
+            .as_deref()
+            .is_some_and(|note| note.contains("演示"))
+    );
+    assert_eq!(item.created_label().len(), 10, "推荐日期是 YYYY-MM-DD");
+
+    assert!(
+        services
+            .recommendation_for(DEMO_ARTICLE_NORMAL)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        services
+            .recommendation_for(DEMO_ARTICLE_READ)
+            .unwrap()
+            .is_none()
+    );
+
+    let data: &dyn ShellData = &services;
+    assert_eq!(data.recommendations().unwrap().len(), 1);
+    assert!(data.recommendation(DEMO_ARTICLE_NORMAL).unwrap().is_some());
+}
+
+#[test]
+fn demo_mode_refuses_recommend_writes_and_keeps_local_rows() {
+    let services = demo_services();
+    let error = services
+        .recommend(DEMO_ARTICLE_NORMAL, Some("临时推荐".into()))
+        .expect_err("demo 没有登录态，不能写推荐");
+    assert!(matches!(error, TelaError::NotLoggedIn { .. }), "{error:?}");
+    assert_eq!(
+        services.list_recommendations().unwrap().len(),
+        1,
+        "写失败不应改本地推荐行"
+    );
+    assert_eq!(services.pending_count().unwrap(), 0, "写失败不应入队");
 }

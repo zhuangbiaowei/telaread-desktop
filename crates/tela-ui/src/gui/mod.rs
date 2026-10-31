@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tela_content::api::ContentApi;
 
 use crate::account::AccountService;
-use crate::shell::{OfflineCacheService, ShellData};
+use crate::shell::{OfflineCacheService, RecommendationService, ShellData};
 
 use gpui_kit::base::v_flex;
 use gpui_kit::*;
@@ -35,6 +35,7 @@ pub struct GuiApp {
     content: Arc<dyn ContentApi>,
     accounts: Option<Arc<dyn AccountService>>,
     offline_cache: Option<Arc<dyn OfflineCacheService>>,
+    recommendations: Option<Arc<dyn RecommendationService>>,
 }
 
 impl GuiApp {
@@ -45,6 +46,7 @@ impl GuiApp {
             content,
             accounts: None,
             offline_cache: None,
+            recommendations: None,
         }
     }
 
@@ -59,12 +61,19 @@ impl GuiApp {
             content,
             accounts: Some(accounts),
             offline_cache: None,
+            recommendations: None,
         }
     }
 
     /// 装配订阅级离线缓存能力（左侧博客列表的“缓存”按钮）。
     pub fn with_offline_cache(mut self, cache: Arc<dyn OfflineCacheService>) -> Self {
         self.offline_cache = Some(cache);
+        self
+    }
+
+    /// 装配推荐写能力（阅读面板的“推荐”按钮与“我的推荐”列表）。
+    pub fn with_recommendations(mut self, recommendations: Arc<dyn RecommendationService>) -> Self {
+        self.recommendations = Some(recommendations);
         self
     }
 }
@@ -152,6 +161,7 @@ pub fn run(app: GuiApp) {
     let content = app.content;
     let accounts = app.accounts;
     let offline_cache = app.offline_cache;
+    let recommendations = app.recommendations;
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         cx.on_window_closed(|cx, _| {
@@ -162,11 +172,12 @@ pub fn run(app: GuiApp) {
         .detach();
         gpui_kit::open_window(window_options(cx), cx, move |_, cx| {
             cx.new(|cx| {
-                ShellView::new_with_services(
+                ShellView::new_with_recommendations(
                     data.clone(),
                     content.clone(),
                     accounts.clone(),
                     offline_cache.clone(),
+                    recommendations.clone(),
                     cx,
                 )
             })

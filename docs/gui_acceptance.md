@@ -23,7 +23,7 @@
 | 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 116 passed / 0 failed |
 | GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 43 passed / 0 failed / 1 ignored |
 
-**总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用。M4 功能尚未开始，按计划应在此之后进入。**
+**总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用；S7 已接上推荐与「我的推荐」。M4 其余功能尚未开始。**
 
 ## 1. 切片与交付
 
@@ -36,6 +36,7 @@
 | S4 | CI GUI job、无窗口数据冒烟、截图、文档回写 | `.github/workflows/ci.yml`、`docs/gui_acceptance.md` | 下方命令 |
 | S5 | 账号面板：登录 / 等待授权（打开/复制/取消）/ 退出；登录后自动同步刷新 | `tela-ui/src/account.rs`、`gui/shell.rs`、`tela-app/src/services.rs` | `gui_account` 3 passed |
 | S6 | 列表发表时间、标题旁打开原文、↑/↓ 逐行滚动、TelaRead 主页入口 | `tela-ui/src/{shell.rs,gui/*}`、`tela-net/src/browser.rs` | `shell_view_model`、`gui_reader`、`gui_shell` |
+| S7 | 推荐弹窗（推荐语/编辑/撤回）、侧栏「我的推荐」与推荐列表 | `tela-ui/src/{shell.rs,gui/*}`、`tela-app/src/services.rs` | `shell_view_model`、`gui_shell`、`services_v2`、`tela-app --lib` |
 
 ### S1 关键行为
 
@@ -62,6 +63,21 @@
 - 阅读区标题旁的 `↗` 用系统浏览器打开原文；文章没有 `url` 时隐藏入口，打开失败在标题下方提示。
 - 左上角品牌文字改为「TelaRead」，点击打开 <https://telaread.com>。
 - GUI 与 `tela-net` 共用 `browser::open` 的平台分支（macOS `open` / Windows `rundll32` / Linux `xdg-open`）。
+
+### S7 推荐与「我的推荐」（2026-10-31）
+
+- 阅读面板标题旁新增「推荐 / 已推荐」按钮；点击打开窗口级模态弹窗，可填写推荐语
+  （可选，上限 500 字）后提交。已推荐时弹窗预填推荐语，并提供「保存 / 取消推荐」。
+- 提交走 `recommend` mutation：先写本地 `recommendations` 行并入离线队列，界面立即生效；
+  随后外壳补一次同步。撤回走 `unrecommend`，本地行立即从列表消失。
+- 侧栏新增「我的推荐」入口（显示数量）；中间栏切换为推荐列表，按推荐时间倒序显示
+  文章标题、博客、日期、推荐语，点击打开文章，行内「取消」撤回推荐。
+- 弹窗打开时阅读面板与外壳的 `o/c/t/n/p/j/k` 全部让位给输入框；`Enter` 在输入框内换行，
+  在按钮上等同提交，提交失败保留弹窗并显示错误。
+- 只读（`read` scope）或 demo 装配下写操作返回明确错误，不伪装成功。
+- 验收：`shell_view_model` 9 passed（推荐 section/导航/错误隔离）、`gui_shell` 6 passed
+  （推荐列表 + 弹窗 + 取消推荐 + 模态快捷键）、`services_v2` 12 passed、
+  `tela-app --lib` 4 passed（本地乐观写入/队列/scope 拒绝）。
 
 ## 2. 验收命令与实测结果
 

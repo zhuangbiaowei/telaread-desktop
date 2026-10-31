@@ -19,10 +19,14 @@ use tela_content::model::TranslationAnswerStatus;
 use crate::reader::document::{ReaderDocument, TranslationStatus, preformatted_text};
 use crate::reader::session::{ReaderSession, ReaderState};
 use crate::reader::{ReaderRow, ViewMode};
-use crate::shell::ShellData;
+use crate::shell::{RecommendationItem, RecommendationService, ShellData};
 
+use gpui_kit::base::input::{InputEditorStyle, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewStyle};
-use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::base::{
+    Dialog, DialogBackdrop, DialogDescription, DialogPopup, DialogTitle, InputBase, Textarea,
+    h_flex, v_flex,
+};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -45,6 +49,24 @@ const TRANSLATION_POLL_INTERVAL: Duration = Duration::from_millis(1600);
 const TRANSLATION_POLL_ATTEMPTS: usize = 36;
 /// 离线时的探活间隔：完全离线时不发译文状态请求，只隔一段时间确认网络是否恢复。
 const OFFLINE_PROBE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// 阅读面板向上层发出的通知。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReaderEvent {
+    /// 当前文章的推荐状态已在本地改变（推荐、改推荐语或取消）。
+    RecommendationChanged {
+        /// 变化的文章 id。
+        article_id: i64,
+    },
+}
+
+/// 推荐弹窗的临时状态：说明文字输入框与打开时是否已推荐。
+struct RecommendDialog {
+    /// 推荐语输入框；打开时创建，关闭时释放。
+    note: Entity<TextareaState>,
+    /// 打开弹窗时这篇文章是否已推荐（决定标题与按钮）。
+    editing: bool,
+}
 
 /// 阅读面板视图。
 pub struct ReaderView {
@@ -74,6 +96,16 @@ pub struct ReaderView {
     scroll_handle: ScrollHandle,
     /// 当前窗口正文的行高，渲染时更新；Up/Down 每次滚一行。
     line_height: Pixels,
+    /// 推荐写能力；为空时不显示推荐按钮。
+    recommendations: Option<Arc<dyn RecommendationService>>,
+    /// 当前文章的推荐（未推荐时为 `None`）。
+    recommendation: Option<RecommendationItem>,
+    /// 推荐弹窗；`None` 表示关闭。
+    recommend_dialog: Option<RecommendDialog>,
+    /// 推荐弹窗里的错误（保留弹窗，方便修改后重试）。
+    recommend_error: Option<String>,
+    /// 推荐操作的一句提示（阅读面板顶部）。
+    recommend_notice: Option<String>,
 }
 
 impl ReaderView {
@@ -81,6 +113,16 @@ impl ReaderView {
     pub fn new(
         data: Arc<dyn ShellData>,
         content: Arc<dyn ContentApi>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_recommendations(data, content, None, cx)
+    }
+
+    /// 带推荐写能力的新建；`recommendations` 为空时推荐按钮不显示。
+    pub fn new_with_recommendations(
+        data: Arc<dyn ShellData>,
+        content: Arc<dyn ContentApi>,
+        recommendations: Option<Arc<dyn RecommendationService>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let session = ReaderSession::new(
@@ -107,6 +149,11 @@ impl ReaderView {
             image_tasks: Vec::new(),
             scroll_handle: ScrollHandle::new(),
             line_height: px(24.),
+            recommendations,
+            recommendation: None,
+            recommend_dialog: None,
+            recommend_error: None,
+            recommend_notice: None,
         }
     }
 
@@ -123,6 +170,26 @@ impl ReaderView {
     /// 当前文章的原文地址（测试/诊断用）。
     pub fn original_url(&self) -> Option<&str> {
         self.article_url.as_deref()
+    }
+
+    /// 当前文章的推荐；未推荐时为 `None`。
+    pub fn recommendation(&self) -> Option<&RecommendationItem> {
+        self.recommendation.as_ref()
+    }
+
+    /// 推荐弹窗是否打开（测试/诊断用）。
+    pub fn recommend_dialog_open(&self) -> bool {
+        self.recommend_dialog.is_some()
+    }
+
+    /// 推荐弹窗里的错误提示（测试/诊断用）。
+    pub fn recommend_error(&self) -> Option<&str> {
+        self.recommend_error.as_deref()
+    }
+
+    /// 推荐操作的一句提示（测试/诊断用）。
+    pub fn recommend_notice(&self) -> Option<&str> {
+        self.recommend_notice.as_deref()
     }
 
     /// 当前翻译提示（请求中 / 失败 / 不提供）。
@@ -167,6 +234,10 @@ impl ReaderView {
         self.article_url = url;
         self.translation_notice = None;
         self.link_notice = None;
+        self.recommend_dialog = None;
+        self.recommend_error = None;
+        self.recommend_notice = None;
+        self.reload_recommendation();
         self.translation_task = None;
         self.scroll_handle.set_offset(Point {
             x: px(0.),
@@ -313,11 +384,133 @@ impl ReaderView {
         cx.notify();
     }
 
+    /// 重新读一次当前文章的推荐状态（取消推荐后由外壳调用）。
+    pub fn refresh_recommendation(&mut self, cx: &mut Context<Self>) {
+        self.reload_recommendation();
+        cx.notify();
+    }
+
+    /// 打开推荐弹窗：已推荐时预填推荐语，按钮变为“保存/取消推荐”。
+    pub fn open_recommend_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recommendations.is_none() || self.article_id.is_none() {
+            return;
+        }
+        let initial = self
+            .recommendation
+            .as_ref()
+            .and_then(|item| item.note.clone())
+            .unwrap_or_default();
+        let note = cx.new(|cx| {
+            let mut state = TextareaState::new(window, cx);
+            state.set_editor_style(InputEditorStyle {
+                foreground: rgb(TEXT).into(),
+                background: rgb(BG).into(),
+                selection: rgba(0x89b4fa55).into(),
+                caret: rgb(TEXT).into(),
+                ..InputEditorStyle::default()
+            });
+            state.default_value(initial)
+        });
+        note.update(cx, |state, cx| state.focus(window, cx));
+        self.recommend_dialog = Some(RecommendDialog {
+            note,
+            editing: self.recommendation.is_some(),
+        });
+        self.recommend_error = None;
+        self.recommend_notice = None;
+        cx.notify();
+    }
+
+    /// 关闭推荐弹窗（取消、Esc、点遮罩都走这里）。
+    pub fn close_recommend_dialog(&mut self) {
+        self.recommend_dialog = None;
+        self.recommend_error = None;
+    }
+
+    /// 提交推荐：读取输入框、校验长度、写本地库并入队，然后通知外壳刷新。
+    pub fn submit_recommendation(&mut self, cx: &mut Context<Self>) {
+        let Some(article_id) = self.article_id else {
+            return;
+        };
+        let Some(dialog) = &self.recommend_dialog else {
+            return;
+        };
+        let text = dialog.note.read(cx).value().trim().to_string();
+        if text.chars().count() > tela_proto::MAX_RECOMMENDATION_NOTE {
+            self.recommend_error = Some(format!(
+                "推荐语最多 {} 字（当前 {} 字）",
+                tela_proto::MAX_RECOMMENDATION_NOTE,
+                text.chars().count()
+            ));
+            cx.notify();
+            return;
+        }
+        let Some(service) = self.recommendations.clone() else {
+            self.recommend_error = Some("当前装配不支持推荐".to_string());
+            cx.notify();
+            return;
+        };
+        let note = if text.is_empty() { None } else { Some(text) };
+        match service.recommend(article_id, note) {
+            Ok(()) => {
+                self.close_recommend_dialog();
+                self.reload_recommendation();
+                self.recommend_notice = Some("已推荐。".to_string());
+                cx.emit(ReaderEvent::RecommendationChanged { article_id });
+            }
+            Err(error) => {
+                self.recommend_error = Some(format!("推荐失败：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 在“编辑推荐”弹窗里撤回这条推荐。
+    pub fn confirm_unrecommend(&mut self, cx: &mut Context<Self>) {
+        let Some(article_id) = self.article_id else {
+            return;
+        };
+        let Some(service) = self.recommendations.clone() else {
+            self.recommend_error = Some("当前装配不支持推荐".to_string());
+            cx.notify();
+            return;
+        };
+        match service.unrecommend(article_id) {
+            Ok(()) => {
+                self.close_recommend_dialog();
+                self.reload_recommendation();
+                self.recommend_notice = Some("已取消推荐。".to_string());
+                cx.emit(ReaderEvent::RecommendationChanged { article_id });
+            }
+            Err(error) => {
+                self.recommend_error = Some(format!("取消推荐失败：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// 从数据源重新读取当前文章的推荐行。
+    fn reload_recommendation(&mut self) {
+        let Some(article_id) = self.article_id else {
+            self.recommendation = None;
+            return;
+        };
+        if self.recommendations.is_none() {
+            self.recommendation = None;
+            return;
+        }
+        self.recommendation = self.data.recommendation(article_id).ok().flatten();
+    }
+
     /// 键盘快捷键：`o` 原文 / `c` 对照 / `t` 译文 / `n` 段落下一页 / `p` 段落上一页 /
     /// `PageUp`/`PageDown` 视口滚动（到头再切段落页）/ `↑`/`↓` 逐行滚动 / `r` 重试。
     ///
     /// 返回是否发生变化；调用方负责 `cx.notify()`。
     pub fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        // 推荐弹窗打开时，输入框里的字符不能被当成视图/翻页快捷键。
+        if self.recommend_dialog.is_some() {
+            return false;
+        }
         match key {
             "o" => self.set_mode(ViewMode::Original),
             "c" => self.set_mode(ViewMode::Compare),
@@ -688,7 +881,9 @@ impl ReaderView {
         let can_next = self.session.page() + 1 < pages;
         let notice = self.translation_notice.clone();
         let link_notice = self.link_notice.clone();
+        let recommend_notice = self.recommend_notice.clone();
         let can_open_original = self.article_url.is_some();
+        let show_recommend = self.recommendations.is_some() && self.article_id.is_some();
 
         v_flex()
             .w_full()
@@ -743,6 +938,9 @@ impl ReaderView {
                                                 }))
                                                 .child("↗"),
                                         )
+                                    })
+                                    .when(show_recommend, |row| {
+                                        row.child(self.recommend_button(cx))
                                     }),
                             )
                             .child(
@@ -753,6 +951,9 @@ impl ReaderView {
                             )
                             .when_some(notice, |element, notice| {
                                 element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                            })
+                            .when_some(recommend_notice, |element, notice| {
+                                element.child(div().text_xs().text_color(rgb(ACCENT)).child(notice))
                             })
                             .when_some(link_notice, |element, notice| {
                                 element.child(div().text_xs().text_color(rgb(DANGER)).child(notice))
@@ -795,6 +996,41 @@ impl ReaderView {
                     .text_color(rgb(MUTED))
                     .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · ↑/↓ 逐行 · PgUp/PgDn 翻页"),
             )
+    }
+
+    /// 标题旁的“推荐/已推荐”按钮：点击打开填写推荐理由的弹窗。
+    fn recommend_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let recommended = self.recommendation.is_some();
+        let label = if recommended { "已推荐" } else { "推荐" };
+        div()
+            .id("reader-recommend")
+            .role(Role::Button)
+            .aria_label(if recommended {
+                "修改或取消推荐"
+            } else {
+                "推荐这篇文章"
+            })
+            .px_3()
+            .py_1()
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(if recommended { ACCENT } else { BORDER }))
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .cursor_pointer()
+            .when(recommended, |element| {
+                element.bg(rgb(ACCENT)).text_color(rgb(BG))
+            })
+            .when(!recommended, |element| {
+                element
+                    .text_color(rgb(SUBTLE))
+                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.open_recommend_dialog(window, cx);
+            }))
+            .child(label)
+            .into_any_element()
     }
 
     fn nav_button(
@@ -1017,6 +1253,161 @@ impl ReaderView {
             })
     }
 
+    /// 推荐弹窗（窗口级模态）：标题、推荐语输入框、提示与按钮。
+    fn recommend_dialog_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = &self.recommend_dialog else {
+            return div().into_any_element();
+        };
+        let editing = dialog.editing;
+        let note = dialog.note.clone();
+        let focus_note = note.clone();
+        let error = self.recommend_error.clone();
+
+        let textarea = InputBase::new("reader-recommend-note")
+            .w_full()
+            .h(px(132.))
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(BG))
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                focus_note.update(cx, |state, cx| state.focus(window, cx));
+            })
+            .child(div().size_full().child(Textarea::new(&note)));
+
+        let cancel = div()
+            .id("reader-recommend-cancel")
+            .role(Role::Button)
+            .aria_label("取消")
+            .px_3()
+            .py_2()
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_sm()
+            .text_color(rgb(SUBTLE))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.close_recommend_dialog();
+                cx.notify();
+            }))
+            .child("取消");
+
+        let submit = div()
+            .id("reader-recommend-submit")
+            .role(Role::Button)
+            .aria_label(if editing { "保存推荐" } else { "推荐" })
+            .px_4()
+            .py_2()
+            .rounded_full()
+            .bg(rgb(ACCENT))
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(BG))
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.85))
+            .on_click(cx.listener(|this, _, _, cx| this.submit_recommendation(cx)))
+            .child(if editing { "保存" } else { "推荐" });
+
+        let unrecommend = div()
+            .id("reader-recommend-unrecommend")
+            .role(Role::Button)
+            .aria_label("取消推荐")
+            .px_3()
+            .py_2()
+            .rounded_full()
+            .text_sm()
+            .text_color(rgb(DANGER))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .on_click(cx.listener(|this, _, _, cx| this.confirm_unrecommend(cx)))
+            .child("取消推荐");
+
+        let close_this = cx.entity().downgrade();
+        let submit_this = cx.entity().downgrade();
+        let popup = DialogPopup::new()
+            .w(px(540.))
+            .p_5()
+            .gap_3()
+            .flex()
+            .flex_col()
+            .items_stretch()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PANEL))
+            .text_color(rgb(TEXT))
+            .child(
+                DialogTitle::new()
+                    .text_lg()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(if editing {
+                        "编辑推荐"
+                    } else {
+                        "推荐给你的读者"
+                    }),
+            )
+            .child(
+                DialogDescription::new()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child("推荐语会显示在你的个人页，作者也能看到；可以留空。"),
+            )
+            .child(div().mt_3().child(textarea))
+            .when_some(error, |element, error| {
+                element.child(div().mt_2().text_xs().text_color(rgb(DANGER)).child(error))
+            })
+            .child(
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(format!("最多 {} 字", tela_proto::MAX_RECOMMENDATION_NOTE)),
+            )
+            .child(
+                h_flex()
+                    .mt_4()
+                    .items_center()
+                    .justify_between()
+                    .child(if editing {
+                        unrecommend.into_any_element()
+                    } else {
+                        div().into_any_element()
+                    })
+                    .child(h_flex().gap_2().child(cancel).child(submit)),
+            );
+
+        Dialog::new(cx)
+            .open(true)
+            // 焦点在输入框时 Enter 由 Textarea 自己处理（换行）；焦点在按钮上时
+            // Enter 等同提交。提交失败要保留弹窗，所以这里不让 Dialog 自行关闭。
+            .on_ok(move |_, _, cx| {
+                let _ = submit_this.update(cx, |reader, cx| reader.submit_recommendation(cx));
+                false
+            })
+            .on_open_change(move |open, _, _, cx| {
+                if open {
+                    return;
+                }
+                let _ = close_this.update(cx, |reader, cx| {
+                    reader.close_recommend_dialog();
+                    cx.notify();
+                });
+            })
+            .backdrop(
+                DialogBackdrop::new()
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x000000aa)),
+            )
+            .popup(popup)
+            .into_any_element()
+    }
+
     fn centered_note(&self, title: &str, detail: &str) -> Div {
         v_flex()
             .flex_1()
@@ -1089,6 +1480,7 @@ impl Render for ReaderView {
         self.line_height = window.line_height();
         let header = self.header(cx);
         let body = self.body(cx);
+        let recommend_dialog = self.recommend_dialog_layer(cx);
         v_flex()
             .id("reader-root")
             .size_full()
@@ -1106,8 +1498,11 @@ impl Render for ReaderView {
             }))
             .child(header)
             .child(body)
+            .child(recommend_dialog)
     }
 }
+
+impl EventEmitter<ReaderEvent> for ReaderView {}
 
 /// 一次 PageUp/PageDown 的滚动距离：视口高度减去少量重叠，避免行被切断。
 fn page_step(viewport: Pixels) -> Pixels {

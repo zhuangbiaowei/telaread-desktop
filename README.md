@@ -4,7 +4,7 @@
 
 > **当前进度**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
 > 全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、订阅级一键离线缓存、
-> 断网自动暂停译文轮询、终端 CLI 与离线 GUI demo。
+> 推荐文章与「我的推荐」、断网自动暂停译文轮询、终端 CLI 与离线 GUI demo。
 > 协议依据是官方 [authorization.md](https://github.com/hutusi/tela/blob/main/docs/api/authorization.md)
 > 与 [v1.md](https://github.com/hutusi/tela/blob/main/docs/api/v1.md)（2026-10-28 实读）。
 > 详细落地说明见 [`docs/real-api.md`](./docs/real-api.md)。
@@ -101,7 +101,7 @@ cargo run -p tela-app -- demo --chapter mock-long
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.4.0
+cargo run -p tela-app -- --version                        # tela-app 0.4.1
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -139,8 +139,9 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 ### 窗口与布局
 
 - 默认窗口 1100×720，最小 880×560；标题为 `Tela Desktop`，关闭最后一个窗口即退出。
-- 三栏：左侧订阅列表（260 px）、中间当前订阅的文章（340 px）、右侧阅读面板（自适应）。
+- 三栏：左侧订阅列表（260 px）、中间当前订阅的文章或「我的推荐」（340–360 px）、右侧阅读面板（自适应）。
 - 左侧顶部是品牌「TelaRead」，点击用系统浏览器打开 <https://telaread.com>；下方是当前订阅状态。
+- 订阅列表上方是「我的推荐」入口，显示已推荐的文章数；点击切换到推荐列表。
 - 每个订阅行显示标题、未读数、feed URL 和「缓存」按钮，选中行高亮；点击整行切换订阅。
 - 中间列表顶部显示当前订阅标题与文章数；每篇文章显示标题、未读标记、发布日期和摘要。
 - 侧栏底部显示订阅数、未读总数与账号面板。
@@ -162,6 +163,16 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
   今日额度用完或作者关闭翻译时，会在标题下方给出对应提示并继续显示原文。
 - 切换视图会保持当前阅读位置；翻页按段落页移动；加载失败显示错误详情与「重试」按钮，
   快捷键 `r` 等效。
+
+### 推荐
+
+- 阅读面板标题旁的「推荐」按钮打开模态弹窗：可填写推荐语（可选，最多 500 字）后提交；
+  已推荐的文章按钮显示「已推荐」，再次打开可以修改推荐语或「取消推荐」。
+- 推荐先写本地库并进入离线队列，界面立即生效；随后自动补一次同步，网络失败时队列保留。
+- 「我的推荐」列出全部未撤回的推荐，按推荐时间倒序，显示文章标题、博客、日期与推荐语；
+  点击条目打开文章，右侧「取消」也可以撤回推荐。
+- 推荐和撤回都需要 `write` scope；只读令牌会保留弹窗并给出明确错误，不会假装成功。
+- 真实的推荐行由 `/v1/sync` 下发；网页或其他设备上的改动会在下一次同步后出现在列表里。
 
 ### 离线缓存与加载策略
 
@@ -201,6 +212,8 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - `--demo` 或 `TELA_DEMO=1` 使用进程内 mock，不需要账号与网络。
 - 空库时自动写入 2 个订阅、4 篇文章（正常 / 长章节 / 无译文 / 已读），覆盖三视图、
   长文分页、无译文回退与已读状态；`TELA_DEV_SEED=0` 可关闭演示数据写入。
+- 演示数据还包含 1 条推荐，可直接查看「我的推荐」列表；演示模式没有账号，推荐/取消推荐
+  会提示需要登录（写操作不会落库）。
 
 ### 当前限制
 
@@ -208,6 +221,7 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 只有「按订阅」文章列表，没有跨订阅的 Unread / Today / Liked 视图。
 - 没有周期性后台同步；目前是启动时同步一次，登录/标记已读等操作后再同步。
 - 没有搜索、Discover、文件夹、高亮/笔记、OPML 与自动更新入口。
+- 推荐只在「我的推荐」里管理；没有成员个人页或公开推荐页。
 - 缓存没有容量上限、占用统计或清理入口；目前只能手动删除本地库文件。
 - 图片只解析 `<img src>`，不处理 `srcset` / `<picture>`。
 
@@ -286,8 +300,8 @@ SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.0 -m "Tela Desktop v0.4.0"
-git push origin v0.4.0
+git tag -a v0.4.1 -m "Tela Desktop v0.4.1"
+git push origin v0.4.1
 ```
 
 推送 tag 后：
@@ -305,8 +319,8 @@ git push origin v0.4.0
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.0-rc.1 -m "Tela Desktop v0.4.0-rc.1"
-git push origin v0.4.0-rc.1
+git tag -a v0.4.1-rc.1 -m "Tela Desktop v0.4.1-rc.1"
+git push origin v0.4.1-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；
