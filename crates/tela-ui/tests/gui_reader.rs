@@ -55,7 +55,12 @@ fn loads_chapter_in_background_and_switches_views(cx: &mut TestAppContext) {
 
     assert!(reader.read_with(cx, |reader, _| reader.session().state().is_loading()));
     reader.update(cx, |reader, cx| {
-        reader.select(42, "Hello Tela".to_string(), cx);
+        reader.select(
+            42,
+            "Hello Tela".to_string(),
+            Some("https://example.com/hello".to_string()),
+            cx,
+        );
     });
     // 后台取数完成、结果回到实体。
     cx.run_until_parked();
@@ -67,6 +72,11 @@ fn loads_chapter_in_background_and_switches_views(cx: &mut TestAppContext) {
         assert_eq!(state.mode(), ViewMode::Compare);
         assert_eq!(state.page(), 0);
         assert_eq!(state.page_count(), 1);
+        assert_eq!(
+            reader.original_url(),
+            Some("https://example.com/hello"),
+            "标题旁的“打开原文”需要保留文章 URL"
+        );
     });
 }
 
@@ -77,7 +87,7 @@ fn view_mode_keys_and_paging_keep_anchor(cx: &mut TestAppContext) {
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
     let reader = cx.new(|cx| ReaderView::new(data(MOCK_LONG_CONTENT_KEY), content, cx));
     reader.update(cx, |reader, cx| {
-        reader.select(43, "长章节".to_string(), cx);
+        reader.select(43, "长章节".to_string(), None, cx);
     });
     cx.run_until_parked();
 
@@ -136,7 +146,7 @@ fn failed_load_is_retryable(cx: &mut TestAppContext) {
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::with_failures(1));
     let reader = cx.new(|cx| ReaderView::new(data(MOCK_CONTENT_KEY), content, cx));
     reader.update(cx, |reader, cx| {
-        reader.select(42, "会失败一次".to_string(), cx);
+        reader.select(42, "会失败一次".to_string(), None, cx);
     });
     cx.run_until_parked();
     assert!(reader.read_with(cx, |reader, _| reader.session().state().is_failed()));
@@ -175,7 +185,7 @@ fn missing_chapter_request_becomes_an_error_page(cx: &mut TestAppContext) {
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
     let reader = cx.new(|cx| ReaderView::new(Arc::new(MissingData), content, cx));
     reader.update(cx, |reader, cx| {
-        reader.select(99, "没有正文".to_string(), cx);
+        reader.select(99, "没有正文".to_string(), None, cx);
     });
 
     // 不需要等后台任务：请求在本地装配阶段就失败了。
@@ -240,7 +250,7 @@ fn missing_translation_requests_server_automatically(cx: &mut TestAppContext) {
     });
     let reader = cx.new(|cx| ReaderView::new(data("untranslated-key"), content, cx));
     reader.update(cx, |reader, cx| {
-        reader.select(7, "没有译文".to_string(), cx);
+        reader.select(7, "没有译文".to_string(), None, cx);
     });
     cx.run_until_parked();
 
@@ -267,7 +277,7 @@ fn page_up_down_fall_back_to_paragraph_pages_without_layout(cx: &mut TestAppCont
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
     let reader = cx.new(|cx| ReaderView::new(data(MOCK_LONG_CONTENT_KEY), content, cx));
     reader.update(cx, |reader, cx| {
-        reader.select(43, "长章节".to_string(), cx);
+        reader.select(43, "长章节".to_string(), None, cx);
     });
     cx.run_until_parked();
 

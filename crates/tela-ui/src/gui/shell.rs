@@ -16,6 +16,9 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+/// 左上角品牌文字点击后打开的 TelaRead 主页。
+pub const HOME_URL: &str = "https://telaread.com";
+
 const BG: u32 = 0x11111b;
 const SIDEBAR: u32 = 0x181825;
 const PANEL: u32 = 0x1e1e2e;
@@ -37,6 +40,8 @@ pub struct ShellView {
     account: AccountStatus,
     login: LoginPhase,
     account_notice: Option<String>,
+    /// 打开 TelaRead 主页失败时的提示（成功不打扰用户）。
+    home_notice: Option<String>,
     login_generation: u64,
     login_task: Option<Task<()>>,
     sync_in_flight: bool,
@@ -77,6 +82,7 @@ impl ShellView {
             account,
             login: LoginPhase::Idle,
             account_notice: None,
+            home_notice: None,
             login_generation: 0,
             login_task: None,
             sync_in_flight: false,
@@ -110,6 +116,20 @@ impl ShellView {
     /// 内容 API 句柄（诊断/后续设置页用）。
     pub fn content(&self) -> Arc<dyn ContentApi> {
         Arc::clone(&self.content)
+    }
+
+    /// 打开 TelaRead 主页失败时的提示（测试/诊断用）。
+    pub fn home_notice(&self) -> Option<&str> {
+        self.home_notice.as_deref()
+    }
+
+    /// 用系统浏览器打开 TelaRead 主页（左上角品牌文字）。
+    pub fn open_home(&mut self, cx: &mut Context<Self>) {
+        match tela_net::browser::open(HOME_URL) {
+            Ok(()) => self.home_notice = None,
+            Err(error) => self.home_notice = Some(format!("打开 TelaRead 主页失败：{error}")),
+        }
+        cx.notify();
     }
 
     /// 选中订阅；返回是否发生变化。
@@ -211,7 +231,7 @@ impl ShellView {
     fn sync_reader(&mut self, cx: &mut Context<Self>) {
         if let Some(article) = self.model.selected_article_item().cloned() {
             self.reader.update(cx, |reader, cx| {
-                reader.select(article.id, article.title, cx)
+                reader.select(article.id, article.title, article.url, cx)
             });
         }
     }
@@ -602,10 +622,25 @@ impl ShellView {
                             .items_center()
                             .justify_between()
                             .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Tela"),
+                                h_flex()
+                                    .id("home-link")
+                                    .role(Role::Button)
+                                    .aria_label("打开 TelaRead 主页")
+                                    .items_center()
+                                    .gap_1()
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(PANEL)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.open_home(cx)))
+                                    .child(
+                                        div()
+                                            .text_xl()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .child("TelaRead"),
+                                    )
+                                    .child(div().text_xs().text_color(rgb(MUTED)).child("↗")),
                             )
                             .child(
                                 div()
@@ -619,7 +654,10 @@ impl ShellView {
                             .text_xs()
                             .text_color(rgb(SUBTLE))
                             .child(model.status_line()),
-                    ),
+                    )
+                    .when_some(self.home_notice.clone(), |element, notice| {
+                        element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                    }),
             )
             .child(Self::feed_list(model, cx))
             .child(
@@ -881,6 +919,9 @@ impl ShellView {
                         element.child(div().text_xs().text_color(rgb(ACCENT)).child("未读"))
                     }),
             )
+            .when_some(article.published_label(), |element, published| {
+                element.child(div().text_xs().text_color(rgb(MUTED)).child(published))
+            })
             .when_some(article.excerpt.clone(), |element, excerpt| {
                 element.child(
                     div()

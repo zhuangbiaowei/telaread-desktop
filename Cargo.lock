@@ -6900,6 +6900,7 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "tela-content",
+ "tela-net",
  "tela-proto",
  "tela-store",
  "tela-sync",

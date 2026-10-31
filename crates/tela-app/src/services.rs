@@ -778,6 +778,7 @@ impl AppServices {
                 ArticleItem {
                     id: article.id,
                     feed_id: article.feed_id,
+                    url: article.url,
                     title: translated
                         .and_then(|title| title.title.clone())
                         .unwrap_or(article.title),

@@ -51,6 +51,8 @@ pub struct ReaderView {
     session: ReaderSession,
     article_id: Option<i64>,
     title: Option<String>,
+    /// 原文地址；用于标题旁的“打开原文”，为空时不显示入口。
+    article_url: Option<String>,
     generation: u64,
     focus: FocusHandle,
     focused: bool,
@@ -59,13 +61,17 @@ pub struct ReaderView {
     /// 已经请求过的 `(contentKey, lang)`，避免每帧重复 POST。
     requested_translations: HashSet<String>,
     translation_notice: Option<String>,
+    /// 打开原文失败等与链接有关的提示。
+    link_notice: Option<String>,
     /// 已解码的图片（src → 内存图），供 `TextView` 的 image_source 解析。
     image_cache: Arc<Mutex<HashMap<String, Arc<Image>>>>,
     /// 正在下载的图片，避免重复请求。
     image_pending: Arc<Mutex<HashSet<String>>>,
     image_tasks: Vec<Task<()>>,
-    /// 正文滚动容器；PageUp/PageDown 按视口高度滚动，而不是按段落分页。
+    /// 正文滚动容器；PageUp/PageDown 按视口高度滚动，Up/Down 按行滚动。
     scroll_handle: ScrollHandle,
+    /// 当前窗口正文的行高，渲染时更新；Up/Down 每次滚一行。
+    line_height: Pixels,
 }
 
 impl ReaderView {
@@ -85,6 +91,7 @@ impl ReaderView {
             session,
             article_id: None,
             title: None,
+            article_url: None,
             generation: 0,
             focus: cx.focus_handle(),
             focused: false,
@@ -92,10 +99,12 @@ impl ReaderView {
             translation_task: None,
             requested_translations: HashSet::new(),
             translation_notice: None,
+            link_notice: None,
             image_cache: Arc::new(Mutex::new(HashMap::new())),
             image_pending: Arc::new(Mutex::new(HashSet::new())),
             image_tasks: Vec::new(),
             scroll_handle: ScrollHandle::new(),
+            line_height: px(24.),
         }
     }
 
@@ -109,9 +118,19 @@ impl ReaderView {
         self.article_id
     }
 
+    /// 当前文章的原文地址（测试/诊断用）。
+    pub fn original_url(&self) -> Option<&str> {
+        self.article_url.as_deref()
+    }
+
     /// 当前翻译提示（请求中 / 失败 / 不提供）。
     pub fn translation_notice(&self) -> Option<&str> {
         self.translation_notice.as_deref()
+    }
+
+    /// 打开原文失败等链接提示。
+    pub fn link_notice(&self) -> Option<&str> {
+        self.link_notice.as_deref()
     }
 
     /// 正文滚动偏移（测试/诊断用；向下滚动时 y 为负）。
@@ -119,18 +138,33 @@ impl ReaderView {
         self.scroll_handle.offset()
     }
 
+    /// 当前行高（Up/Down 的滚动步长，测试/诊断用）。
+    pub fn line_height(&self) -> Pixels {
+        self.line_height
+    }
+
     /// 选中文章：换正文请求、进入加载态，并在后台取数。
     ///
     /// 重复选中同一篇不做任何事（避免每次点击都重新请求）；
     /// 失败后重试走 [`Self::reload`]。
-    pub fn select(&mut self, article_id: i64, title: String, cx: &mut Context<Self>) {
+    pub fn select(
+        &mut self,
+        article_id: i64,
+        title: String,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         // 同一篇且当前不是失败态：不重复请求。失败态下再点一次等于重试。
         if self.article_id == Some(article_id) && !self.session.state().is_failed() {
+            self.title = Some(title);
+            self.article_url = url;
             return;
         }
         self.article_id = Some(article_id);
         self.title = Some(title);
+        self.article_url = url;
         self.translation_notice = None;
+        self.link_notice = None;
         self.translation_task = None;
         self.scroll_handle.set_offset(Point {
             x: px(0.),
@@ -239,8 +273,46 @@ impl ReaderView {
         self.prev_page()
     }
 
+    /// ↑：向上滚动一行（不跨段落页）。
+    pub fn line_up(&mut self) -> bool {
+        self.scroll_lines(1.)
+    }
+
+    /// ↓：向下滚动一行（不跨段落页）。
+    pub fn line_down(&mut self) -> bool {
+        self.scroll_lines(-1.)
+    }
+
+    /// 按当前行高滚动 `lines` 行；方向与 `ScrollHandle` 一致（向下为负）。
+    fn scroll_lines(&mut self, lines: f32) -> bool {
+        let offset = self.scroll_handle.offset();
+        let max = self.scroll_handle.max_offset().y.max(px(0.));
+        let delta = self.line_height * lines;
+        let target_y = (offset.y + delta).clamp(-max, px(0.));
+        if target_y == offset.y {
+            return false;
+        }
+        self.scroll_handle.set_offset(Point {
+            x: offset.x,
+            y: target_y,
+        });
+        true
+    }
+
+    /// 用系统浏览器打开当前文章的原文；失败时在标题下方提示。
+    pub fn open_original(&mut self, cx: &mut Context<Self>) {
+        let Some(url) = self.article_url.clone() else {
+            return;
+        };
+        match tela_net::browser::open(&url) {
+            Ok(()) => self.link_notice = None,
+            Err(error) => self.link_notice = Some(format!("打开原文失败：{error}")),
+        }
+        cx.notify();
+    }
+
     /// 键盘快捷键：`o` 原文 / `c` 对照 / `t` 译文 / `n` 段落下一页 / `p` 段落上一页 /
-    /// `PageUp`/`PageDown` 视口滚动（到头再切段落页）/ `r` 重试。
+    /// `PageUp`/`PageDown` 视口滚动（到头再切段落页）/ `↑`/`↓` 逐行滚动 / `r` 重试。
     ///
     /// 返回是否发生变化；调用方负责 `cx.notify()`。
     pub fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
@@ -250,6 +322,8 @@ impl ReaderView {
             "t" => self.set_mode(ViewMode::Translation),
             "n" => self.next_page(),
             "p" => self.prev_page(),
+            "up" => self.line_up(),
+            "down" => self.line_down(),
             "pagedown" => self.page_down(),
             "pageup" => self.page_up(),
             "r" => {
@@ -562,6 +636,8 @@ impl ReaderView {
         let can_prev = self.session.page() > 0;
         let can_next = self.session.page() + 1 < pages;
         let notice = self.translation_notice.clone();
+        let link_notice = self.link_notice.clone();
+        let can_open_original = self.article_url.is_some();
 
         v_flex()
             .w_full()
@@ -581,11 +657,42 @@ impl ReaderView {
                             .min_w_0()
                             .gap_1()
                             .child(
-                                div()
-                                    .text_lg()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .truncate()
-                                    .child(title),
+                                h_flex()
+                                    .w_full()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_lg()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .truncate()
+                                            .child(title),
+                                    )
+                                    .when(can_open_original, |row| {
+                                        row.child(
+                                            div()
+                                                .id("reader-open-original")
+                                                .role(Role::Button)
+                                                .aria_label("打开原文")
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .text_sm()
+                                                .text_color(rgb(SUBTLE))
+                                                .cursor_pointer()
+                                                .hover(|style| {
+                                                    style.bg(rgb(BORDER)).text_color(rgb(ACCENT))
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.open_original(cx);
+                                                }))
+                                                .child("↗"),
+                                        )
+                                    }),
                             )
                             .child(
                                 div()
@@ -595,6 +702,9 @@ impl ReaderView {
                             )
                             .when_some(notice, |element, notice| {
                                 element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                            })
+                            .when_some(link_notice, |element, notice| {
+                                element.child(div().text_xs().text_color(rgb(DANGER)).child(notice))
                             }),
                     )
                     .child(h_flex().items_center().gap_1().children(modes)),
@@ -632,7 +742,7 @@ impl ReaderView {
                 div()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · PgUp/PgDn 翻页"),
+                    .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · ↑/↓ 逐行 · PgUp/PgDn 翻页"),
             )
     }
 
@@ -924,6 +1034,8 @@ impl Render for ReaderView {
             window.focus(&self.focus, cx);
             self.focused = true;
         }
+        // Up/Down 按窗口正文行高滚动；放大字体时步长跟着变。
+        self.line_height = window.line_height();
         let header = self.header(cx);
         let body = self.body(cx);
         v_flex()

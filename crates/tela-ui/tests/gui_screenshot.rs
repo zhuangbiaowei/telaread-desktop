@@ -48,6 +48,7 @@ impl ShellData for DemoData {
                 ArticleItem {
                     id: 42,
                     feed_id: 1,
+                    url: Some("https://example.com/articles/42".to_string()),
                     title: "Hello Tela：一篇文章的完整对照".to_string(),
                     unread: true,
                     published_at: Some(1_761_350_700),
@@ -56,6 +57,7 @@ impl ShellData for DemoData {
                 ArticleItem {
                     id: 43,
                     feed_id: 1,
+                    url: Some("https://example.com/articles/43".to_string()),
                     title: "长章节：120 段分页演示".to_string(),
                     unread: true,
                     published_at: Some(1_761_350_600),
@@ -64,6 +66,7 @@ impl ShellData for DemoData {
                 ArticleItem {
                     id: 44,
                     feed_id: 1,
+                    url: Some("https://example.com/articles/44".to_string()),
                     title: "没有译文时仍然能读原文".to_string(),
                     unread: true,
                     published_at: Some(1_761_350_500),
@@ -76,6 +79,7 @@ impl ShellData for DemoData {
             vec![ArticleItem {
                 id: 45,
                 feed_id: 2,
+                url: Some("https://example.com/articles/45".to_string()),
                 title: "Rust 周报 #1：已读文章".to_string(),
                 unread: false,
                 published_at: Some(1_761_350_400),

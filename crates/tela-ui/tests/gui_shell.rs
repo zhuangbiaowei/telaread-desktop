@@ -58,6 +58,7 @@ fn article(id: i64, feed_id: i64, title: &str) -> ArticleItem {
     ArticleItem {
         id,
         feed_id,
+        url: Some(format!("https://example.com/articles/{id}")),
         title: title.to_string(),
         unread: true,
         published_at: Some(1_761_350_400 + id),
@@ -226,6 +227,35 @@ fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
         reader.scroll_offset().y
     });
     assert_eq!(after_up, px(0.), "PageUp 应回到顶部");
+
+    // ↑/↓ 每次只滚一行，且到顶后停住。
+    let line = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        reader.read(cx).line_height()
+    });
+    cx.simulate_keystrokes(window, "down");
+    let one_line = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        reader.read(cx).scroll_offset().y
+    });
+    assert_eq!(one_line, px(0.) - line, "↓ 应只滚动一行");
+    cx.simulate_keystrokes(window, "up");
+    let back_to_top = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        reader.read(cx).scroll_offset().y
+    });
+    assert_eq!(back_to_top, px(0.), "↑ 应回到顶部");
+    cx.simulate_keystrokes(window, "up");
+    let still_top = cx.update(|cx| {
+        let reader = view.read(cx).reader();
+        reader.read(cx).scroll_offset().y
+    });
+    assert_eq!(still_top, px(0.), "已经在顶部时 ↑ 不应继续滚动");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).reader().read(cx).session().page()),
+        0,
+        "逐行滚动不应切段落页"
+    );
 
     cx.simulate_keystrokes(window, "j");
     assert_eq!(

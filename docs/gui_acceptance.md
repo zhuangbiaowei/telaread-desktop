@@ -20,8 +20,8 @@
 | S2 三栏 shell + 订阅列表 + 空态 | ✅ | `shell_view_model` 5 + `gui_shell` 2 passed；截图 |
 | S3 文章列表 + 阅读面板 + 交互 | ✅ | `gui_reader` 4 passed；三视图/翻页/失败重试；截图 |
 | S4 CI/验收/文档 | ✅（CI 配置已加，未在 GitHub runner 实跑） | `.github/workflows/ci.yml` 的 `gui` job；本文档 |
-| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 128 passed / 0 failed / 1 ignored |
-| GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 26 passed / 0 failed / 1 ignored |
+| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 116 passed / 0 failed |
+| GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 43 passed / 0 failed / 1 ignored |
 
 **总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用。M4 功能尚未开始，按计划应在此之后进入。**
 
@@ -35,6 +35,7 @@
 | S3 | `ReaderView`：后台取数、generation 防旧结果覆盖、三视图、翻页、重试、键盘 | `tela-ui/src/gui/reader.rs`、`reader/session.rs` | `gui_reader` |
 | S4 | CI GUI job、无窗口数据冒烟、截图、文档回写 | `.github/workflows/ci.yml`、`docs/gui_acceptance.md` | 下方命令 |
 | S5 | 账号面板：登录 / 等待授权（打开/复制/取消）/ 退出；登录后自动同步刷新 | `tela-ui/src/account.rs`、`gui/shell.rs`、`tela-app/src/services.rs` | `gui_account` 3 passed |
+| S6 | 列表发表时间、标题旁打开原文、↑/↓ 逐行滚动、TelaRead 主页入口 | `tela-ui/src/{shell.rs,gui/*}`、`tela-net/src/browser.rs` | `shell_view_model`、`gui_reader`、`gui_shell` |
 
 ### S1 关键行为
 
@@ -51,8 +52,16 @@
 - 所有列表数据来自 `ShellData` 只读快照；GUI 不写 SQL、不发 HTTP。
 - 阅读取数在 `background_executor` 执行；每次加载带 `generation`，快速切换文章时旧结果被丢弃。
 - 三视图复用 `ReaderSession` / `ReaderRow`，终端宿主与 GUI 共享同一套语义。
-- 快捷键：`o` 原文、`c` 对照、`t` 译文、`n` 下一页、`p` 上一页、`r` 重试。
+- 快捷键：`o` 原文、`c` 对照、`t` 译文、`n` 下一页、`p` 上一页、`r` 重试；
+  `↑`/`↓` 按窗口行高逐行滚动，`PgUp`/`PgDn` 按视口滚动。
 - 阅读位置在切视图/翻页时保持一致（`anchor` 不变）。
+
+### S6 列表与阅读体验细节（2026-10-31）
+
+- 中间文章列表在标题下方显示发表时间（UTC 日期）；兼容 wire 的毫秒时间戳与旧 fixture 的秒时间戳。
+- 阅读区标题旁的 `↗` 用系统浏览器打开原文；文章没有 `url` 时隐藏入口，打开失败在标题下方提示。
+- 左上角品牌文字改为「TelaRead」，点击打开 <https://telaread.com>。
+- GUI 与 `tela-net` 共用 `browser::open` 的平台分支（macOS `open` / Windows `rundll32` / Linux `xdg-open`）。
 
 ## 2. 验收命令与实测结果
 
@@ -62,16 +71,16 @@
 ```bash
 # 1) 默认构建/测试（不编译 gpui-kit，保护无 GUI 系统库的机器）
 cargo test --workspace --locked
-# 实测：128 passed / 0 failed / 1 ignored
+# 实测：116 passed / 0 failed
 
 # 2) GUI 测试（无头；显式去掉显示环境，证明不依赖显示器）
 env -u DISPLAY -u WAYLAND_DISPLAY \
   cargo test -p tela-ui --features gui-test --locked
-# 实测：26 passed / 0 failed / 1 ignored（ignored = 截图工具，需 WGPU headless renderer）
+# 实测：43 passed / 0 failed / 1 ignored（ignored = 截图工具，需 WGPU headless renderer）
 
 # 3) 应用装配 + GUI 数据冒烟
 cargo test -p tela-app --features gui --locked
-# 实测：17 passed / 0 failed；其中 gui_check 1 passed
+# 实测：21 passed / 0 failed；其中 gui_check 1 passed
 
 # 4) 真实二进制：开窗 demo
 TELA_DB=target/tela-gui.db \
@@ -116,7 +125,7 @@ S3 截图由 `gui_screenshot` 用 GPUI `HeadlessAppContext` + WGPU 渲染，和�
    `TestAppContext` / `#[gpui::test]` / `HeadlessAppContext`），不启用 gpui-kit 的测试
    feature；元素级查询的缺失由纯视图模型测试 + 截图补足。
 3. **GUI 测试无头**：`#[gpui::test]` 不创建真实窗口；截图测试显式使用
-   `HeadlessAppContext`。本机在 `env -u DISPLAY -u WAYLAND_DISPLAY` 下 26 passed，
+   `HeadlessAppContext`。本机在 `env -u DISPLAY -u WAYLAND_DISPLAY` 下 43 passed，
    回答了计划 Q-13。
 4. **不阻塞渲染线程**：正文 `ContentApi` 是同步 trait，GUI 在
    `background_executor().spawn` 里调用，完成后回实体更新；本地 SQLite/列表读取在首帧

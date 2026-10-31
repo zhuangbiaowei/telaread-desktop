@@ -34,6 +34,8 @@ pub struct ArticleItem {
     pub id: i64,
     /// 所属 feed id。
     pub feed_id: i64,
+    /// 原文地址；缺失时阅读面板不显示“打开原文”。
+    pub url: Option<String>,
     /// 标题（服务端保证非空）。
     pub title: String,
     /// 是否未读。
@@ -42,6 +44,43 @@ pub struct ArticleItem {
     pub published_at: Option<i64>,
     /// 摘要；可空。
     pub excerpt: Option<String>,
+}
+
+impl ArticleItem {
+    /// 列表里展示的发表时间（UTC 日期）；没有发布时间时为 `None`。
+    pub fn published_label(&self) -> Option<String> {
+        self.published_at.map(format_published_at)
+    }
+}
+
+/// epoch 时间 → `YYYY-MM-DD`。
+///
+/// v1 wire 的 `publishedAt` 是毫秒，但历史 fixture 和演示数据里也出现过秒；
+/// 小于 1e11 的值按秒处理。只显示 UTC 日期，避免引入时区依赖——列表排序
+/// 仍由服务端的 `sortAt` 决定，日期只用于让人看出新旧。
+pub fn format_published_at(timestamp: i64) -> String {
+    let ms = if timestamp.unsigned_abs() < 100_000_000_000 {
+        timestamp.saturating_mul(1000)
+    } else {
+        timestamp
+    };
+    let days = ms.div_euclid(86_400_000);
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Howard Hinnant 的 civil_from_days 算法（1970-01-01 起的天数 → 年月日）。
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    (y + i64::from(m <= 2), m as u32, d as u32)
 }
 
 /// 外壳的数据来源：只读，不发请求、不写库。
@@ -261,5 +300,38 @@ impl ShellViewModel {
                 self.articles_error = Some(error.to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn article(published_at: Option<i64>) -> ArticleItem {
+        ArticleItem {
+            id: 1,
+            feed_id: 1,
+            url: None,
+            title: "标题".to_string(),
+            unread: true,
+            published_at,
+            excerpt: None,
+        }
+    }
+
+    #[test]
+    fn published_label_uses_utc_dates_for_seconds_and_milliseconds() {
+        assert_eq!(format_published_at(1_761_350_400), "2025-10-25");
+        assert_eq!(format_published_at(1_761_350_400_000), "2025-10-25");
+        assert_eq!(format_published_at(0), "1970-01-01");
+        assert_eq!(
+            article(Some(1_761_350_700)).published_label().as_deref(),
+            Some("2025-10-25")
+        );
+    }
+
+    #[test]
+    fn missing_published_at_has_no_label() {
+        assert_eq!(article(None).published_label(), None);
     }
 }

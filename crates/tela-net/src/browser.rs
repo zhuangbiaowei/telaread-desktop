@@ -12,7 +12,9 @@ pub fn open(url: &str) -> Result<(), TelaError> {
     match command_for(current_platform(), url).spawn() {
         Ok(_child) => Ok(()),
         Err(err) => Err(TelaError::Config {
-            detail: format!("无法打开系统浏览器（{err}）；请手动访问上面打印的授权地址"),
+            // 调用方各有上下文（授权页 / 原文 / 主页），这里只说明系统动作失败；
+            // 授权 CLI 会把完整 URL 打印出来，GUI 会把链接放进提示或剪贴板。
+            detail: format!("无法打开系统浏览器（{err}）"),
         }),
     }
 }

@@ -72,6 +72,7 @@ fn article(id: i64, feed_id: i64, title: &str, unread: bool) -> ArticleItem {
     ArticleItem {
         id,
         feed_id,
+        url: Some(format!("https://example.com/articles/{id}")),
         title: title.to_string(),
         unread,
         published_at: Some(1_761_350_400 + id),

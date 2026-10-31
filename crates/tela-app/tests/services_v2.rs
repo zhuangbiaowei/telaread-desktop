@@ -54,6 +54,11 @@ fn seed_is_idempotent_and_reports_unread_by_the_five_rules() {
         articles[0].title, "你好，Tela：完整对照",
         "标题取当前语言译文"
     );
+    assert_eq!(
+        articles[0].url.as_deref(),
+        Some(format!("https://example.com/articles/{DEMO_ARTICLE_NORMAL}").as_str()),
+        "阅读面板的“打开原文”依赖这个 URL"
+    );
     assert!(articles.iter().all(|article| article.unread));
 }
 

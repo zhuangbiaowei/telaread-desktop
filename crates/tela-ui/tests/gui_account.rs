@@ -36,6 +36,7 @@ impl ShellData for FakeData {
             ArticleItem {
                 id: 42,
                 feed_id: 1,
+                url: Some("https://example.com/articles/42".into()),
                 title: "Hello Tela".into(),
                 unread: true,
                 published_at: Some(1_761_350_400_000),
@@ -44,6 +45,7 @@ impl ShellData for FakeData {
             ArticleItem {
                 id: 43,
                 feed_id: 1,
+                url: Some("https://example.com/articles/43".into()),
                 title: "第二篇".into(),
                 unread: true,
                 published_at: Some(1_761_350_300_000),
