@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tela_content::api::ContentApi;
 
 use crate::account::AccountService;
-use crate::shell::ShellData;
+use crate::shell::{OfflineCacheService, ShellData};
 
 use gpui_kit::base::v_flex;
 use gpui_kit::*;
@@ -34,6 +34,7 @@ pub struct GuiApp {
     data: Arc<dyn ShellData>,
     content: Arc<dyn ContentApi>,
     accounts: Option<Arc<dyn AccountService>>,
+    offline_cache: Option<Arc<dyn OfflineCacheService>>,
 }
 
 impl GuiApp {
@@ -43,6 +44,7 @@ impl GuiApp {
             data,
             content,
             accounts: None,
+            offline_cache: None,
         }
     }
 
@@ -56,7 +58,14 @@ impl GuiApp {
             data,
             content,
             accounts: Some(accounts),
+            offline_cache: None,
         }
+    }
+
+    /// 装配订阅级离线缓存能力（左侧博客列表的“缓存”按钮）。
+    pub fn with_offline_cache(mut self, cache: Arc<dyn OfflineCacheService>) -> Self {
+        self.offline_cache = Some(cache);
+        self
     }
 }
 
@@ -142,6 +151,7 @@ pub fn run(app: GuiApp) {
     let data = app.data;
     let content = app.content;
     let accounts = app.accounts;
+    let offline_cache = app.offline_cache;
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         cx.on_window_closed(|cx, _| {
@@ -152,7 +162,13 @@ pub fn run(app: GuiApp) {
         .detach();
         gpui_kit::open_window(window_options(cx), cx, move |_, cx| {
             cx.new(|cx| {
-                ShellView::new_with_accounts(data.clone(), content.clone(), accounts.clone(), cx)
+                ShellView::new_with_services(
+                    data.clone(),
+                    content.clone(),
+                    accounts.clone(),
+                    offline_cache.clone(),
+                    cx,
+                )
             })
         })
         .expect("open Tela window");

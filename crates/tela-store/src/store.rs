@@ -15,7 +15,10 @@ use tela_proto::{
 use crate::schema;
 
 /// 当前 schema 版本。
-pub const LATEST_SCHEMA_VERSION: i64 = 2;
+///
+/// v3 新增 `cached_translations`，v4 新增 `cached_images`；旧库升级只补表，
+/// 不会丢正文/译文缓存与离线队列。
+pub const LATEST_SCHEMA_VERSION: i64 = 4;
 
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_SYNC_CURSOR: &str = "sync_cursor";
@@ -66,7 +69,7 @@ impl Store {
         Ok(store)
     }
 
-    /// v1 → v2 迁移：旧库是 mock 协议（行带 `seq`、游标是整数），与真实 API 不兼容。
+    /// v1 → 当前版本迁移：旧库是 mock 协议（行带 `seq`、游标是整数），与真实 API 不兼容。
     ///
     /// 这里**丢弃**旧的 `sync_rows` 与 `meta`，但保留用户目录里的库文件本身。理由：
     /// v1 数据全部来自 mock/演示，没有任何真实服务端数据可保留；而 `pending_mutations`
@@ -104,7 +107,7 @@ impl Store {
             tx.execute_batch("DROP TABLE IF EXISTS sync_rows; DROP TABLE IF EXISTS meta;")
                 .map_err(|_| migrate_err())?;
         }
-        tx.execute_batch(schema::SCHEMA_V2)
+        tx.execute_batch(schema::SCHEMA_CURRENT)
             .map_err(|_| migrate_err())?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)
@@ -467,6 +470,132 @@ impl Store {
             .map_err(|_| store_error(StoreStage::Query, &self.path))?;
         Ok(usize::try_from(count).unwrap_or(0))
     }
+
+    // ---- 译文缓存 ----
+
+    /// 写入一个译本快照（`state` 是 wire 小写状态；`object` 是译本对象 JSON）。
+    ///
+    /// 同一 `(content_key, lang)` 覆盖写：服务端从 pending 变成 done 时只更新这一行。
+    pub fn put_translation(
+        &mut self,
+        content_key: &str,
+        lang: &str,
+        state: &str,
+        object: Option<&str>,
+    ) -> Result<(), TelaError> {
+        self.conn
+            .execute(
+                "INSERT INTO cached_translations (content_key, lang, state, object, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(content_key, lang) DO UPDATE SET
+                   state = excluded.state,
+                   object = excluded.object,
+                   updated_at = excluded.updated_at",
+                params![content_key, lang, state, object, tela_proto::now_ms()],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(())
+    }
+
+    /// 读一个译本快照；没有缓存过返回 `None`。
+    pub fn get_translation(
+        &self,
+        content_key: &str,
+        lang: &str,
+    ) -> Result<Option<CachedTranslation>, TelaError> {
+        self.conn
+            .query_row(
+                "SELECT content_key, lang, state, object, updated_at \
+                 FROM cached_translations WHERE content_key = ?1 AND lang = ?2",
+                params![content_key, lang],
+                |row| {
+                    Ok(CachedTranslation {
+                        content_key: row.get(0)?,
+                        lang: row.get(1)?,
+                        state: row.get(2)?,
+                        object: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 缓存的译本快照数。
+    pub fn translation_count(&self) -> Result<usize, TelaError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM cached_translations", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// 某个正文 key 下缓存的译本快照数（多语言）。
+    pub fn translation_count_for(&self, content_key: &str) -> Result<usize, TelaError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cached_translations WHERE content_key = ?1",
+                params![content_key],
+                |row| row.get(0),
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    // ---- 图片缓存 ----
+
+    /// 缓存一张图片的原始字节（按 URL/src 覆盖写；图片是不可变对象）。
+    pub fn put_image(&mut self, src: &str, body: &[u8]) -> Result<(), TelaError> {
+        self.conn
+            .execute(
+                "INSERT INTO cached_images (src, body, fetched_at) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(src) DO UPDATE SET body = excluded.body, \
+                 fetched_at = excluded.fetched_at",
+                params![src, body, tela_proto::now_ms()],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(())
+    }
+
+    /// 读缓存的图片字节；没有缓存过返回 `None`。
+    pub fn get_image(&self, src: &str) -> Result<Option<Vec<u8>>, TelaError> {
+        self.conn
+            .query_row(
+                "SELECT body FROM cached_images WHERE src = ?1",
+                params![src],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 缓存的图片数。
+    pub fn image_count(&self) -> Result<usize, TelaError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM cached_images", [], |row| row.get(0))
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+}
+
+/// 一条缓存的译本快照。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedTranslation {
+    /// 正文 key。
+    pub content_key: String,
+    /// 译文语言。
+    pub lang: String,
+    /// 最近一次观察到的 wire 状态（`none` / `requested` / `running` / `waiting` / `done` / `partial` …）。
+    pub state: String,
+    /// 完成时的译本对象 JSON（`state` 为 pending/none 时为 `None`）。
+    pub object: Option<String>,
+    /// 写入时间（epoch 毫秒）。
+    pub updated_at: i64,
 }
 
 /// 一条已落库的同步行：wire 表名 + 业务主键 + wire JSON 正文。

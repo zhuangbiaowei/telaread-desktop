@@ -43,6 +43,8 @@ const READING_MAX_WIDTH: f32 = 760.0;
 /// 翻译轮询间隔与最多轮数（约一分钟）。
 const TRANSLATION_POLL_INTERVAL: Duration = Duration::from_millis(1600);
 const TRANSLATION_POLL_ATTEMPTS: usize = 36;
+/// 离线时的探活间隔：完全离线时不发译文状态请求，只隔一段时间确认网络是否恢复。
+const OFFLINE_PROBE_INTERVAL: Duration = Duration::from_secs(10);
 
 /// 阅读面板视图。
 pub struct ReaderView {
@@ -418,56 +420,105 @@ impl ReaderView {
         let api = Arc::clone(&self.content);
         let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
             let mut should_poll = true;
+            let mut request_sent = !send_request;
+            let mut attempts_used = 0usize;
+            let mut offline_notified = false;
 
-            if send_request {
-                let request_api = Arc::clone(&api);
-                let lang = request.lang.clone();
-                let answer = cx
-                    .background_executor()
-                    .spawn(async move { request_api.request_translation(article_id, &lang) })
-                    .await;
-                match answer {
-                    Ok(answer) => match answer.status {
-                        // 服务端说已经就绪：立即取一次译本对象。
-                        TranslationAnswerStatus::Ready => should_poll = false,
-                        TranslationAnswerStatus::Running | TranslationAnswerStatus::Waiting => {}
-                        TranslationAnswerStatus::Refused => {
-                            let notice = "今日翻译额度已用完，译文明天恢复；现在可以读原文。";
-                            set_translation_notice(&this, cx, generation, article_id, notice);
-                            return;
-                        }
-                        TranslationAnswerStatus::Unavailable | TranslationAnswerStatus::Unknown => {
-                            let notice = "服务端没有提供这篇的翻译（作者关闭翻译或正文为空）。";
-                            set_translation_notice(&this, cx, generation, article_id, notice);
-                            return;
-                        }
-                    },
-                    Err(error) => {
-                        let notice = format!("翻译请求失败：{error}");
-                        set_translation_notice(&this, cx, generation, article_id, &notice);
+            loop {
+                // 完全离线：不发 POST，也不查译文状态；只做轻量探活。
+                if api.is_offline() {
+                    let _ = api.probe_network();
+                    let still_current = this
+                        .update(cx, |reader, _| {
+                            reader.generation == generation && reader.article_id == Some(article_id)
+                        })
+                        .unwrap_or(false);
+                    if !still_current {
                         return;
                     }
+                    if api.is_offline() {
+                        if !offline_notified {
+                            set_translation_notice(
+                                &this,
+                                cx,
+                                generation,
+                                article_id,
+                                "网络已断开，暂停检查译文；恢复后会自动继续。",
+                            );
+                            offline_notified = true;
+                        }
+                        cx.background_executor().timer(OFFLINE_PROBE_INTERVAL).await;
+                        continue;
+                    }
+                    offline_notified = false;
                 }
-            }
 
-            let attempts = if should_poll {
-                TRANSLATION_POLL_ATTEMPTS
-            } else {
-                1
-            };
-            for attempt in 0..attempts {
-                let delay = if attempt == 0 {
+                if !request_sent {
+                    request_sent = true;
+                    let request_api = Arc::clone(&api);
+                    let lang = request.lang.clone();
+                    let answer = cx
+                        .background_executor()
+                        .spawn(async move { request_api.request_translation(article_id, &lang) })
+                        .await;
+                    match answer {
+                        Ok(answer) => match answer.status {
+                            // 服务端说已经就绪：立即取一次译本对象。
+                            TranslationAnswerStatus::Ready => should_poll = false,
+                            TranslationAnswerStatus::Running | TranslationAnswerStatus::Waiting => {
+                            }
+                            TranslationAnswerStatus::Refused => {
+                                let notice = "今日翻译额度已用完，译文明天恢复；现在可以读原文。";
+                                set_translation_notice(&this, cx, generation, article_id, notice);
+                                return;
+                            }
+                            TranslationAnswerStatus::Unavailable
+                            | TranslationAnswerStatus::Unknown => {
+                                let notice = "服务端没有提供这篇的翻译（作者关闭翻译或正文为空）。";
+                                set_translation_notice(&this, cx, generation, article_id, notice);
+                                return;
+                            }
+                        },
+                        Err(error) => {
+                            // 网络断了：保留任务，恢复后重新 POST 一次。
+                            if api.is_offline() {
+                                request_sent = false;
+                                continue;
+                            }
+                            let notice = format!("翻译请求失败：{error}");
+                            set_translation_notice(&this, cx, generation, article_id, &notice);
+                            return;
+                        }
+                    }
+                }
+
+                let attempts = if should_poll {
+                    TRANSLATION_POLL_ATTEMPTS
+                } else {
+                    1
+                };
+                if attempts_used >= attempts {
+                    break;
+                }
+                let delay = if attempts_used == 0 {
                     Duration::from_millis(600)
                 } else {
                     TRANSLATION_POLL_INTERVAL
                 };
                 cx.background_executor().timer(delay).await;
+                // 等待期间断网：这次不消耗轮询次数，回到顶部进入离线等待。
+                if api.is_offline() {
+                    continue;
+                }
+                attempts_used += 1;
 
                 let request_api = Arc::clone(&api);
                 let next_request = request.clone();
+                // 轮询译文必须绕过本地缓存，否则 pending 快照永远不变；
+                // `refresh_chapter` 只查译文状态，不重复下载不可变正文。
                 let result = cx
                     .background_executor()
-                    .spawn(async move { request_api.load_chapter(&next_request) })
+                    .spawn(async move { request_api.refresh_chapter(&next_request) })
                     .await;
                 let Ok(chapter) = result else {
                     continue;

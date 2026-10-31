@@ -336,10 +336,32 @@ impl ContentApi for MockContentApi {
             .map(|_| mock_row(content_key, lang, TranslationState::Done)))
     }
 
+    fn translation_view(
+        &self,
+        content: &ContentObject,
+        lang: &str,
+    ) -> Result<TranslationView, TelaError> {
+        // mock 直接按正文 key 查译文 fixture；与 `load_chapter` 同一份数据，
+        // 这样“正文已缓存、只刷新译文”的轮询路径也可用。
+        Ok(match translation_object(&content.key, lang)? {
+            Some(object) => TranslationView::from_object(content.total_blocks(), object),
+            None => TranslationView::NotAvailable,
+        })
+    }
+
     fn load_image(&self, _src: &str) -> Result<Vec<u8>, TelaError> {
         // 离线演示也要能看见“图片”，否则截图/验收里永远只有占位文字。
         // 用 SVG 而不是内嵌二进制：可读、体积极小，GPUI 自带 SVG 渲染。
         Ok(mock_cover_svg())
+    }
+
+    fn probe_network(&self) -> Result<(), TelaError> {
+        // 进程内 mock 没有真实网络；仍消费一次失败注入，便于测试离线判定。
+        if self.consume_injected_failure() {
+            Err(injected_failure("probe"))
+        } else {
+            Ok(())
+        }
     }
 }
 

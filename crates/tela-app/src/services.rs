@@ -23,7 +23,7 @@ use tela_content::http::normalize_content_key;
 use tela_content::mock::{
     MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MOCK_NO_TRANSLATION_CONTENT_KEY,
 };
-use tela_content::model::{Chapter, ContentObject};
+use tela_content::model::Chapter;
 use tela_net::callback::PendingLogin;
 use tela_net::{
     ApiClient, AuthConfig, AuthSession, KeyringTokenStore, MemoryTokenStore, MockTransport,
@@ -37,7 +37,9 @@ use tela_proto::{
 use tela_store::Store;
 use tela_sync::{PullError, PullOptions, SyncEngine, SyncReport, SyncStatus};
 use tela_ui::account::{AccountMode, AccountService, AccountStatus, LoginTicket};
-use tela_ui::shell::{ArticleItem, FeedItem, ShellData};
+use tela_ui::shell::{ArticleItem, FeedItem, OfflineCacheService, ShellData};
+
+use crate::content_cache::CachingContentApi;
 
 /// 数据库路径覆盖开关。
 pub const ENV_DB: &str = "TELA_DB";
@@ -229,7 +231,8 @@ fn db_path_from_env() -> PathBuf {
 /// 应用服务。
 pub struct AppServices {
     store: Arc<Mutex<Store>>,
-    content: Arc<dyn ContentApi>,
+    /// 带本地缓存的正文/译文层：单篇打开与订阅批量下载都走这里。
+    content: Arc<CachingContentApi>,
     transport: Arc<dyn SyncTransport>,
     auth: Option<Arc<AuthSession>>,
     api: Option<Arc<ApiClient>>,
@@ -256,9 +259,15 @@ impl AppServices {
                 path: config.db_path.display().to_string(),
             })?;
         }
-        let store = Store::open(&config.db_path)?;
+        let store = Arc::new(Mutex::new(Store::open(&config.db_path)?));
+        let content = Arc::new(CachingContentApi::new(
+            content,
+            Arc::clone(&store),
+            config.lang.clone(),
+            config.db_path.clone(),
+        ));
         Ok(Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             content,
             transport,
             auth: None,
@@ -277,13 +286,21 @@ impl AppServices {
         content: Arc<dyn ContentApi>,
         transport: Arc<dyn SyncTransport>,
     ) -> Result<Self, TelaError> {
+        let lang = lang.into();
+        let store = Arc::new(Mutex::new(Store::open_in_memory()?));
+        let content = Arc::new(CachingContentApi::new(
+            content,
+            Arc::clone(&store),
+            lang.clone(),
+            ":memory:",
+        ));
         Ok(Self {
-            store: Arc::new(Mutex::new(Store::open_in_memory()?)),
+            store,
             content,
             transport,
             auth: None,
             api: None,
-            lang: lang.into(),
+            lang,
             db_path: PathBuf::from(":memory:"),
             horizon_days: DEFAULT_HORIZON_DAYS,
             pending_login: Mutex::new(None),
@@ -331,8 +348,15 @@ impl AppServices {
             store.set_account(&handle)?;
         }
 
+        let store = Arc::new(Mutex::new(store));
+        let content = Arc::new(CachingContentApi::new(
+            content,
+            Arc::clone(&store),
+            config.lang.clone(),
+            config.db_path.clone(),
+        ));
         let services = Self {
-            store: Arc::new(Mutex::new(store)),
+            store,
             content,
             transport,
             auth: Some(auth),
@@ -387,9 +411,16 @@ impl AppServices {
         self.horizon_days
     }
 
-    /// 内容 API 句柄。
+    /// 内容 API 句柄（带本地缓存；GUI/CLI 阅读都走它）。
     pub fn content(&self) -> Arc<dyn ContentApi> {
-        Arc::clone(&self.content)
+        let content: Arc<dyn ContentApi> = self.content.clone();
+        content
+    }
+
+    /// 离线缓存能力句柄（左侧博客列表的“缓存”按钮）。
+    pub fn offline_cache(&self) -> Arc<dyn OfflineCacheService> {
+        let cache: Arc<dyn OfflineCacheService> = self.content.clone();
+        cache
     }
 
     /// 认证会话（demo 装配没有）。
@@ -820,30 +851,10 @@ impl AppServices {
         Ok(ChapterRequest::new(content_key, self.lang.clone()))
     }
 
-    /// 取正文（优先本地缓存；不可变对象可长期复用）。
+    /// 取正文（本地优先；第一次加载后正文与译文都从本地库读）。
     pub fn load_chapter(&self, article_id: i64) -> Result<Chapter, TelaError> {
         let request = self.chapter_request_for(article_id)?;
-        let cached = self.lock_store()?.get_body(&request.content_key)?;
-        if let Some(body) = cached
-            && let Ok(content) = serde_json::from_str::<ContentObject>(&body)
-        {
-            // 正文不可变，缓存永远优先；离线/令牌过期时退回原文显示，
-            // 不因为拿不到译本状态就让整篇读不了。
-            let translation = match self.content.translation_view(&content, &self.lang) {
-                Ok(view) => view,
-                Err(error) if error.needs_login() || matches!(error, TelaError::Net { .. }) => {
-                    tela_content::model::TranslationView::NotAvailable
-                }
-                Err(error) => return Err(error),
-            };
-            return Ok(Chapter::new(content, translation));
-        }
-
-        let chapter = self.content.load_chapter(&request)?;
-        if let Ok(body) = serde_json::to_string(&chapter.content) {
-            self.lock_store()?.put_body(&request.content_key, &body)?;
-        }
-        Ok(chapter)
+        self.content.load_chapter(&request)
     }
 
     /// 请求正文翻译（需要 write 令牌）。

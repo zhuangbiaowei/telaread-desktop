@@ -98,6 +98,122 @@ pub trait ShellData: Send + Sync {
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError>;
 }
 
+/// 订阅级离线缓存进度（左侧博客名旁的按钮显示它）。
+///
+/// `done/total` 是“已处理”的文章数，不等同于“已完整缓存”：译文仍在生成的
+/// 文章会计入 `pending`，下次点击按钮会继续补齐。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfflineCacheProgress {
+    /// 订阅 id。
+    pub feed_id: i64,
+    /// 该订阅的文章总数。
+    pub total: usize,
+    /// 已处理文章数（0..=total）。
+    pub done: usize,
+    /// 本次新缓存的原文数。
+    pub originals: usize,
+    /// 本次新缓存的译文数。
+    pub translations: usize,
+    /// 本次新缓存的图片数。
+    pub images: usize,
+    /// 图片下载失败数（网络/404）。
+    pub images_failed: usize,
+    /// 原文与译文都已缓存、本次跳过的篇数。
+    pub skipped: usize,
+    /// 失败篇数（网络/本地库错误）。
+    pub failed: usize,
+    /// 仍在生成、需要下次继续的译文数。
+    pub pending: usize,
+    /// 后台任务是否已结束。
+    pub finished: bool,
+}
+
+impl OfflineCacheProgress {
+    /// 缓存中（任务未结束）。
+    pub fn is_running(&self) -> bool {
+        !self.finished
+    }
+
+    /// 左侧按钮上的一行短文案。
+    pub fn button_label(&self) -> String {
+        if !self.finished {
+            if self.total == 0 {
+                return "缓存中…".to_string();
+            }
+            return format!("{}/{}", self.done, self.total);
+        }
+        if self.failed > 0 || self.images_failed > 0 {
+            return "重试".to_string();
+        }
+        if self.pending > 0 {
+            return format!("待续 {}", self.pending);
+        }
+        "已缓存".to_string()
+    }
+}
+
+/// 一次订阅离线缓存的最终结果。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfflineCacheReport {
+    /// 该订阅的文章总数（不含没有正文 key 的文章）。
+    pub total: usize,
+    /// 新缓存的原文数。
+    pub originals_cached: usize,
+    /// 新缓存的译文数。
+    pub translations_cached: usize,
+    /// 新缓存的图片数。
+    pub images_cached: usize,
+    /// 图片下载失败数。
+    pub images_failed: usize,
+    /// 原文与译文都已缓存、本次跳过的篇数。
+    pub skipped: usize,
+    /// 失败篇数。
+    pub failed: usize,
+    /// 译文仍在生成、需要下次点击继续的篇数。
+    pub pending: usize,
+    /// 失败/额度提示（最多保留若干条）。
+    pub errors: Vec<String>,
+}
+
+impl OfflineCacheReport {
+    /// 状态栏/提示里的一句话总结。
+    pub fn summary(&self) -> String {
+        let mut summary = format!(
+            "共 {} 篇：新缓存原文 {} 篇、译文 {} 篇",
+            self.total, self.originals_cached, self.translations_cached
+        );
+        if self.images_cached > 0 {
+            summary.push_str(&format!("、图片 {} 张", self.images_cached));
+        }
+        if self.skipped > 0 {
+            summary.push_str(&format!("，已缓存 {} 篇", self.skipped));
+        }
+        if self.pending > 0 {
+            summary.push_str(&format!("，仍待翻译 {} 篇", self.pending));
+        }
+        if self.failed > 0 {
+            summary.push_str(&format!("，失败 {} 篇", self.failed));
+        }
+        if self.images_failed > 0 {
+            summary.push_str(&format!("，图片失败 {} 张", self.images_failed));
+        }
+        summary
+    }
+}
+
+/// 离线缓存能力：供左侧博客列表的“缓存”按钮调用。
+///
+/// 实现方在后台线程里把该订阅下所有文章的原文与译文写入本地库；
+/// 回调会被多次调用，UI 据此显示进度。调用是阻塞的。
+pub trait OfflineCacheService: Send + Sync {
+    /// 缓存该订阅下所有未缓存的原文与译文。
+    fn cache_feed(
+        &self,
+        feed_id: i64,
+        progress: &(dyn Fn(OfflineCacheProgress) + Send + Sync),
+    ) -> Result<OfflineCacheReport, TelaError>;
+}
+
 /// 三栏外壳的当前状态。
 ///
 /// 约定：

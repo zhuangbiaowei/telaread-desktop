@@ -5,7 +5,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use gpui::{AppContext, TestAppContext};
 use tela_content::api::{ChapterRequest, ContentApi};
@@ -267,6 +268,150 @@ fn missing_translation_requests_server_automatically(cx: &mut TestAppContext) {
                 .map(str::to_string))
             .is_some(),
         "请求翻译后应给用户一个状态提示"
+    );
+}
+
+/// 可切换网络状态的 API：第一次刷新失败后进入离线，探活成功再恢复。
+struct OfflineFlakyApi {
+    offline: Arc<AtomicBool>,
+    fail_first_refresh: AtomicBool,
+    refreshes: Arc<AtomicUsize>,
+    probes: Arc<AtomicUsize>,
+    requests: Arc<AtomicUsize>,
+}
+
+impl OfflineFlakyApi {
+    fn chapter_with(request: &ChapterRequest, translation: TranslationView) -> Chapter {
+        let content = ContentObject {
+            format: 1,
+            norm: 0,
+            key: request.content_key.clone(),
+            lang: "en".to_string(),
+            blocks: vec![ContentBlock {
+                tag: "p".to_string(),
+                html: "<p>Offline polling.</p>".to_string(),
+                leaves: Vec::new(),
+            }],
+            leaves: BTreeMap::new(),
+            images: Vec::new(),
+            stats: ContentStats::default(),
+        };
+        Chapter::new(content, translation)
+    }
+
+    fn pending_chapter(request: &ChapterRequest) -> Chapter {
+        Self::chapter_with(
+            request,
+            TranslationView::Pending {
+                state: tela_content::model::TranslationState::Running,
+                due_at: None,
+            },
+        )
+    }
+
+    fn offline_error() -> TelaError {
+        TelaError::Net {
+            ctx: tela_proto::WireContext::new("mock://offline", "probe"),
+            detail: "网络不可用".into(),
+        }
+    }
+}
+
+impl ContentApi for OfflineFlakyApi {
+    fn load_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        // 第一次打开没有译文 → 触发一次 POST，然后进入轮询。
+        Ok(Self::chapter_with(request, TranslationView::NotAvailable))
+    }
+
+    fn request_translation(
+        &self,
+        _article_id: i64,
+        _lang: &str,
+    ) -> Result<TranslationAnswer, TelaError> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Ok(TranslationAnswer {
+            status: TranslationAnswerStatus::Running,
+            translation: None,
+            reason: None,
+            resets_at: None,
+        })
+    }
+
+    fn is_offline(&self) -> bool {
+        self.offline.load(Ordering::SeqCst)
+    }
+
+    fn refresh_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        self.refreshes.fetch_add(1, Ordering::SeqCst);
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(Self::offline_error());
+        }
+        if self.fail_first_refresh.swap(false, Ordering::SeqCst) {
+            self.offline.store(true, Ordering::SeqCst);
+            return Err(Self::offline_error());
+        }
+        Ok(Self::pending_chapter(request))
+    }
+
+    fn probe_network(&self) -> Result<(), TelaError> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
+        if self.offline.load(Ordering::SeqCst) {
+            Err(Self::offline_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[gpui::test]
+fn offline_pauses_translation_polling_and_resumes_after_probe(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let offline = Arc::new(AtomicBool::new(false));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let probes = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let content: Arc<dyn ContentApi> = Arc::new(OfflineFlakyApi {
+        offline: Arc::clone(&offline),
+        fail_first_refresh: AtomicBool::new(true),
+        refreshes: Arc::clone(&refreshes),
+        probes: Arc::clone(&probes),
+        requests: Arc::clone(&requests),
+    });
+    let reader = cx.new(|cx| ReaderView::new(data("offline-polling-key"), content, cx));
+    reader.update(cx, |reader, cx| {
+        reader.select(8, "离线段落".to_string(), None, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(requests.load(Ordering::SeqCst), 1, "在线时应 POST 翻译");
+
+    // 第一次轮询失败 → 判定离线。
+    cx.executor().advance_clock(Duration::from_millis(700));
+    cx.run_until_parked();
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    assert!(offline.load(Ordering::SeqCst));
+
+    // 离线时只探活，不查译文状态。
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1, "离线不应请求译文");
+    assert_eq!(probes.load(Ordering::SeqCst), 1, "离线只做一次轻量探活");
+    let notice = reader
+        .read_with(cx, |reader, _| {
+            reader.translation_notice().map(str::to_string)
+        })
+        .unwrap_or_default();
+    assert!(notice.contains("网络已断开"), "{notice}");
+
+    // 恢复网络：探活成功后继续原来的轮询。
+    offline.store(false, Ordering::SeqCst);
+    cx.executor().advance_clock(Duration::from_secs(11));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(
+        refreshes.load(Ordering::SeqCst) > 1,
+        "网络恢复后应继续轮询译文"
     );
 }
 

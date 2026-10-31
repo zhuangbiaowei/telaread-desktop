@@ -106,6 +106,11 @@ impl ContentApi for HttpContentApi {
         // 服务端也有直接把图片写成绝对 URL 的情况，get_bytes 原样使用。
         self.api.get_bytes(src)
     }
+
+    fn probe_network(&self) -> Result<(), TelaError> {
+        // `/meta` 不需要令牌，且响应很小：只验证「能否到达 API」。
+        self.api.meta().map(|_| ())
+    }
 }
 
 /// 正文 key 归一化：接受裸 key 或旧的 `c/<key>.json` 形状。

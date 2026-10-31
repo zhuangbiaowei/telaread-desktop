@@ -20,6 +20,10 @@ pub struct SyncStatus {
     pub pending: usize,
     /// 缓存的正文对象数。
     pub bodies: usize,
+    /// 缓存的译本快照数。
+    pub translations: usize,
+    /// 缓存的图片数。
+    pub images: usize,
     /// 最近一次失败文案。
     pub last_error: Option<String>,
 }
@@ -39,6 +43,8 @@ impl SyncStatus {
             row_counts,
             pending: store.pending_count()?,
             bodies: store.body_count()?,
+            translations: store.translation_count()?,
+            images: store.image_count()?,
             last_error,
         })
     }
@@ -68,7 +74,10 @@ impl SyncStatus {
             self.total_rows(),
             self.pending
         ));
-        out.push_str(&format!("  bodies {}\n", self.bodies));
+        out.push_str(&format!(
+            "  bodies {} / translations {} / images {}\n",
+            self.bodies, self.translations, self.images
+        ));
         for (table, count) in &self.row_counts {
             if *count > 0 {
                 out.push_str(&format!("  {table:<16} {count}\n"));

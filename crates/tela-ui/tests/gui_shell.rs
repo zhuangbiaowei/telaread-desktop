@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use gpui::{
     AppContext, Bounds, Entity, Point, Render, TestAppContext, Window, WindowBounds, WindowOptions,
@@ -14,7 +16,9 @@ use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
-use tela_ui::shell::{ArticleItem, FeedItem, ShellData};
+use tela_ui::shell::{
+    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService, ShellData,
+};
 
 #[derive(Default)]
 struct FakeData {
@@ -298,4 +302,93 @@ fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
         window.draw(cx).clear(cx);
     })
     .unwrap();
+}
+
+/// 点击缓存按钮后：后台回调进度、完成后显示提示，且不会切换当前订阅。
+struct FakeCache {
+    calls: Arc<AtomicUsize>,
+}
+
+impl OfflineCacheService for FakeCache {
+    fn cache_feed(
+        &self,
+        feed_id: i64,
+        progress: &(dyn Fn(OfflineCacheProgress) + Send + Sync),
+    ) -> Result<OfflineCacheReport, TelaError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        progress(OfflineCacheProgress {
+            feed_id,
+            total: 2,
+            done: 1,
+            originals: 1,
+            ..OfflineCacheProgress::default()
+        });
+        progress(OfflineCacheProgress {
+            feed_id,
+            total: 2,
+            done: 2,
+            originals: 2,
+            translations: 1,
+            finished: false,
+            ..OfflineCacheProgress::default()
+        });
+        Ok(OfflineCacheReport {
+            total: 2,
+            originals_cached: 2,
+            translations_cached: 1,
+            ..OfflineCacheReport::default()
+        })
+    }
+}
+
+#[gpui::test]
+fn cache_button_runs_prefetch_and_reports_progress(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 2, 2), feed(2, "技术随笔", 1, 1)],
+        articles: HashMap::from([(
+            1,
+            vec![article(42, 1, "Hello Tela"), article(43, 1, "长章节")],
+        )]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let cache: Arc<dyn OfflineCacheService> = Arc::new(FakeCache {
+        calls: Arc::clone(&calls),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| ShellView::new_with_services(data_for_view, content(), None, Some(cache), cx))
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // 直接调用按钮动作（GPUI 的元素级点击在 headless 下不如方法调用稳定）。
+    view.update(cx, |view, cx| view.cache_feed(1, cx));
+    cx.run_until_parked();
+    // 进度轮询任务每 200ms 收一次尾。
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let progress = view
+        .read_with(cx, |view, _| view.cache_progress(1).cloned())
+        .expect("应记录订阅 1 的缓存进度");
+    assert!(progress.finished);
+    assert_eq!(progress.originals, 2);
+    assert_eq!(progress.translations, 1);
+    let notice = view
+        .read_with(cx, |view, _| view.cache_notice().map(str::to_string))
+        .expect("完成后应有一句提示");
+    assert!(notice.contains("Tela 示例博客"), "{notice}");
+    assert!(notice.contains("新缓存原文 2 篇"), "{notice}");
+    // 缓存按钮不应顺带切换订阅。
+    assert_eq!(
+        view.read_with(cx, |view, _| view.model().selected_feed),
+        Some(1)
+    );
 }

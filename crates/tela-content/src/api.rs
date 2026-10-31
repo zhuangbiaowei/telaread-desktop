@@ -45,6 +45,31 @@ pub trait ContentApi: Send + Sync {
     /// - 其余失败统一为 [`TelaError`]。
     fn load_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError>;
 
+    /// 刷新一章：正文可以继续走本地缓存，但译文状态必须重新向远端查询。
+    ///
+    /// 阅读面板在等待服务端翻译时用它轮询（否则缓存里的 `pending` 快照会
+    /// 永远不变）；打开文章仍然走 [`Self::load_chapter`]，命中缓存就不再联网。
+    ///
+    /// 默认实现退回 `load_chapter`，只有带缓存的后端需要覆盖。
+    fn refresh_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        self.load_chapter(request)
+    }
+
+    /// 当前后端是否已经判定为离线（最近一次网络请求失败）。
+    ///
+    /// 阅读面板据此暂停译文轮询：完全离线时不再反复发 `/v1/translations/...`。
+    fn is_offline(&self) -> bool {
+        false
+    }
+
+    /// 轻量探活：确认网络是否恢复。
+    ///
+    /// 调用方负责控制频率（阅读面板在离线时约十秒探测一次）；实现方只需要
+    /// 发起一个最小请求并更新 [`Self::is_offline`] 的判定。
+    fn probe_network(&self) -> Result<(), TelaError> {
+        Ok(())
+    }
+
     /// 请求为某篇文章生成正文译文（`write` 令牌）。
     fn request_translation(
         &self,

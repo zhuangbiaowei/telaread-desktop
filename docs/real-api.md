@@ -23,7 +23,7 @@ CLI 与本地库。GUI 的实时后台同步、Discover/Search、划线/文件�
 | 正文对象 | `GET /v1/bodies?keys=` | `tela-content::http::HttpContentApi` |
 | 翻译请求/状态/对象 | `/v1/translations`、`/o/t/…` | 同上 |
 | 接收方/读取方 | `/v1/me`、`/v1/usage` | `ApiClient::me/usage` |
-| 本地库 v2 | — | `tela-store`（schema v2） |
+| 本地库 v4 | — | `tela-store`（schema v4）；`tela-app::content_cache` 负责正文/译文/图片缓存与离线预取 |
 | GUI 账号面板 | — | `tela-ui::account` + `ShellView`：登录/等待授权/复制链接/退出 |
 | CLI | — | `tela-app login/sync/list/read/mark-read/mark-unread/like/status/meta/demo` |
 
@@ -155,17 +155,29 @@ cargo run -p tela-app -- login --ephemeral    # 刷新令牌只放内存（不�
 
 ## 7. 本地库
 
-schema v2：
+schema v4：
 
 | 表 | 用途 |
 |---|---|
 | `meta` | `TEXT` 键值：schema 版本、游标、语言、类型、账号 handle |
 | `sync_rows` | `(entity, row_key)` + wire JSON；无 `seq` |
 | `pending_mutations` | 自增 `seq` + 唯一 `mid` + `at` + wire JSON |
-| `bodies` | `content_key` → 不可变正文 JSON |
+| `bodies` | `content_key` → 不可变正文 JSON（第一次打开后永久复用） |
+| `cached_translations` | `(content_key, lang)` → 译本状态 + 译本对象 JSON（含 pending/none 快照） |
+| `cached_images` | 图片 URL → 原始字节 BLOB（正文与译文里的 `<img>` 都覆盖） |
 
 迁移：v1（mock 协议，行带 `seq`、游标是整数）与真实 API 不兼容，打开时丢弃 `sync_rows`
-与 `meta`，保留库文件本身。真实数据从登录后的第一次快照开始。
+与 `meta`，保留库文件本身。v2 → v4 只补 `cached_translations` / `cached_images`，
+正文缓存与离线队列原样保留。真实数据从登录后的第一次快照开始。
+
+阅读与离线：`tela-app::content_cache::CachingContentApi` 第一次打开时从远端取回正文、译文
+与图片并写入上面三张缓存表；之后打开只读本地。左侧博客名旁的「缓存」按钮按订阅批量预取
+所有未缓存的原文、译文与图片，译文仍在服务端生成时计入「待续」，图片失败会显示重试，
+再次点击会继续补齐。
+
+离线判定是自动的：任何远端请求返回 `TelaError::Net` 就把内存状态标为离线，阅读面板随即
+停止 `/v1/translations/...` 轮询；离线期间只每约 10 秒调用一次 `GET /meta` 做轻量探活，
+成功后自动恢复轮询。收到任何 HTTP 响应（包括 5xx）都会把状态改回在线。
 
 ---
 

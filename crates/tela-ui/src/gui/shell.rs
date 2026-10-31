@@ -3,14 +3,19 @@
 //! 只做“把 [`ShellViewModel`] 画成元素 + 把点击转成模型操作”，
 //! 不查库、不发 HTTP、不解析正文。阅读面板在 S3 由 [`crate::gui::reader`] 接管。
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tela_content::api::ContentApi;
 use tela_proto::TelaError;
 
 use crate::account::{AccountMode, AccountService, AccountStatus, LoginPhase, LoginTicket};
 use crate::gui::reader::ReaderView;
-use crate::shell::{ArticleItem, FeedItem, ShellData, ShellViewModel};
+use crate::shell::{
+    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService,
+    ShellData, ShellViewModel,
+};
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -47,6 +52,14 @@ pub struct ShellView {
     sync_in_flight: bool,
     sync_again: bool,
     sync_task: Option<Task<()>>,
+    /// 订阅级离线缓存能力；测试/无账号装配可以为空（按钮仍显示，点击给出提示）。
+    offline_cache: Option<Arc<dyn OfflineCacheService>>,
+    /// 每个订阅最近一次缓存进度（左侧按钮显示它）。
+    cache_progress: HashMap<i64, OfflineCacheProgress>,
+    /// 缓存完成/失败的一句提示（侧栏顶部）。
+    cache_notice: Option<String>,
+    /// 后台缓存任务与进度轮询任务，必须保活。
+    cache_tasks: Vec<Task<()>>,
 }
 
 impl ShellView {
@@ -64,6 +77,17 @@ impl ShellView {
         data: Arc<dyn ShellData>,
         content: Arc<dyn ContentApi>,
         accounts: Option<Arc<dyn AccountService>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_services(data, content, accounts, None, cx)
+    }
+
+    /// 完整装配：账号能力 + 订阅级离线缓存能力（真实 GUI 用）。
+    pub fn new_with_services(
+        data: Arc<dyn ShellData>,
+        content: Arc<dyn ContentApi>,
+        accounts: Option<Arc<dyn AccountService>>,
+        offline_cache: Option<Arc<dyn OfflineCacheService>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let reader = cx.new(|cx| ReaderView::new(data.clone(), content.clone(), cx));
@@ -88,6 +112,10 @@ impl ShellView {
             sync_in_flight: false,
             sync_again: false,
             sync_task: None,
+            offline_cache,
+            cache_progress: HashMap::new(),
+            cache_notice: None,
+            cache_tasks: Vec::new(),
         };
         view.sync_reader(cx);
         view
@@ -130,6 +158,152 @@ impl ShellView {
             Err(error) => self.home_notice = Some(format!("打开 TelaRead 主页失败：{error}")),
         }
         cx.notify();
+    }
+
+    /// 某个订阅当前的离线缓存进度（测试/按钮文案用）。
+    pub fn cache_progress(&self, feed_id: i64) -> Option<&OfflineCacheProgress> {
+        self.cache_progress.get(&feed_id)
+    }
+
+    /// 最近一次缓存完成/失败的提示。
+    pub fn cache_notice(&self) -> Option<&str> {
+        self.cache_notice.as_deref()
+    }
+
+    /// 点击博客名旁的“缓存”按钮：后台缓存该订阅所有未缓存的原文与译文。
+    ///
+    /// 同一订阅正在缓存时重复点击会被忽略；完成后可以再点一次补齐仍在
+    /// 生成中的译文（服务端翻译是异步的）。
+    pub fn cache_feed(&mut self, feed_id: i64, cx: &mut Context<Self>) {
+        if self
+            .cache_progress
+            .get(&feed_id)
+            .is_some_and(OfflineCacheProgress::is_running)
+        {
+            return;
+        }
+        let Some(cache) = self.offline_cache.clone() else {
+            self.cache_notice = Some("当前装配不支持离线缓存".to_string());
+            cx.notify();
+            return;
+        };
+        let title = self
+            .model
+            .feeds
+            .iter()
+            .find(|feed| feed.id == feed_id)
+            .map(|feed| feed.title.clone())
+            .unwrap_or_else(|| format!("订阅 {feed_id}"));
+
+        let progress = Arc::new(Mutex::new(OfflineCacheProgress {
+            feed_id,
+            ..OfflineCacheProgress::default()
+        }));
+        let outcome: Arc<Mutex<Option<Result<OfflineCacheReport, TelaError>>>> =
+            Arc::new(Mutex::new(None));
+        self.cache_progress.insert(
+            feed_id,
+            progress.lock().map(|p| p.clone()).unwrap_or_default(),
+        );
+        self.cache_notice = Some(format!("开始离线缓存「{title}」…"));
+
+        // 后台线程做网络/磁盘；进度回调只写共享快照，不直接碰 UI。
+        let background_progress = Arc::clone(&progress);
+        let background_outcome = Arc::clone(&outcome);
+        let background_cache = Arc::clone(&cache);
+        let callback_progress = Arc::clone(&background_progress);
+        let background_task = cx.background_executor().spawn(async move {
+            let result = background_cache.cache_feed(feed_id, &move |snapshot| {
+                if let Ok(mut guard) = callback_progress.lock() {
+                    *guard = snapshot;
+                }
+            });
+            if let Ok(mut slot) = background_outcome.lock() {
+                *slot = Some(result);
+            }
+            if let Ok(mut guard) = background_progress.lock() {
+                guard.finished = true;
+            }
+        });
+        self.cache_tasks.push(background_task);
+
+        // 前台定时把进度搬到视图并重绘；后台任务结束后收尾一次。
+        let poll_progress = Arc::clone(&progress);
+        let poll_outcome = Arc::clone(&outcome);
+        let poll_task = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(200))
+                    .await;
+                let snapshot = poll_progress
+                    .lock()
+                    .map(|guard| guard.clone())
+                    .unwrap_or_default();
+                let finished = snapshot.finished;
+                let result = poll_outcome.lock().ok().and_then(|slot| slot.clone());
+                let keep_going = this.update(cx, |view, cx| {
+                    view.cache_progress.insert(feed_id, snapshot.clone());
+                    if finished {
+                        view.finish_cache(feed_id, &title, result);
+                    }
+                    cx.notify();
+                    !finished
+                });
+                if !matches!(keep_going, Ok(true)) {
+                    break;
+                }
+            }
+        });
+        self.cache_tasks.push(poll_task);
+        // 任务句柄只增不减是有意的：中途 drain 会取消仍在缓存的任务。
+        // 每次点击只产生两个句柄，一次会话内的数量很小。
+        cx.notify();
+    }
+
+    /// 缓存收尾：把最终结果写进提示，并把进度快照标记为完成。
+    fn finish_cache(
+        &mut self,
+        feed_id: i64,
+        title: &str,
+        result: Option<Result<OfflineCacheReport, TelaError>>,
+    ) {
+        match result {
+            Some(Ok(report)) => {
+                let detail = report
+                    .errors
+                    .first()
+                    .map(|error| format!("；{error}"))
+                    .unwrap_or_default();
+                self.cache_notice = Some(format!(
+                    "「{title}」离线缓存完成：{}{detail}",
+                    report.summary()
+                ));
+                let mut progress = self
+                    .cache_progress
+                    .get(&feed_id)
+                    .cloned()
+                    .unwrap_or_default();
+                progress.finished = true;
+                progress.originals = report.originals_cached;
+                progress.translations = report.translations_cached;
+                progress.images = report.images_cached;
+                progress.images_failed = report.images_failed;
+                progress.skipped = report.skipped;
+                progress.failed = report.failed;
+                progress.pending = report.pending;
+                self.cache_progress.insert(feed_id, progress);
+            }
+            Some(Err(error)) => {
+                self.cache_notice = Some(format!("「{title}」离线缓存失败：{error}"));
+                if let Some(progress) = self.cache_progress.get_mut(&feed_id) {
+                    progress.finished = true;
+                    progress.failed += 1;
+                }
+            }
+            None => {
+                self.cache_notice = Some(format!("「{title}」离线缓存任务结束，但没有拿到结果"));
+            }
+        }
     }
 
     /// 选中订阅；返回是否发生变化。
@@ -657,9 +831,12 @@ impl ShellView {
                     )
                     .when_some(self.home_notice.clone(), |element, notice| {
                         element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                    })
+                    .when_some(self.cache_notice.clone(), |element, notice| {
+                        element.child(div().text_xs().text_color(rgb(MUTED)).child(notice))
                     }),
             )
-            .child(Self::feed_list(model, cx))
+            .child(self.feed_list(cx))
             .child(
                 v_flex()
                     .p_3()
@@ -675,7 +852,8 @@ impl ShellView {
             )
     }
 
-    fn feed_list(model: &ShellViewModel, cx: &mut Context<Self>) -> impl IntoElement {
+    fn feed_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = &self.model;
         let mut list = v_flex()
             .id("feed-list")
             .flex_1()
@@ -692,18 +870,20 @@ impl ShellView {
         }
 
         for feed in &model.feeds {
-            list = list.child(Self::feed_row(feed, model.selected_feed, cx));
+            list = list.child(self.feed_row(feed, model.selected_feed, cx));
         }
         list
     }
 
     fn feed_row(
+        &self,
         feed: &FeedItem,
         selected: Option<i64>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let feed_id = feed.id;
         let is_selected = selected == Some(feed.id);
+        let cache_button = self.cache_button(feed, cx);
         v_flex()
             .id(("feed", feed.id as u64))
             .role(Role::Button)
@@ -731,6 +911,8 @@ impl ShellView {
                     .gap_2()
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_sm()
                             .font_weight(if is_selected {
                                 FontWeight::SEMIBOLD
@@ -740,6 +922,8 @@ impl ShellView {
                             .truncate()
                             .child(feed.title.clone()),
                     )
+                    // 离线缓存按钮：博客名右侧，点一次缓存该订阅全部原文与译文。
+                    .child(cache_button)
                     .when(feed.unread > 0, |element| {
                         element.child(
                             div()
@@ -757,6 +941,43 @@ impl ShellView {
                     .truncate()
                     .child(feed.feed_url.clone()),
             )
+    }
+
+    /// 博客名右侧的离线缓存按钮。
+    fn cache_button(&self, feed: &FeedItem, cx: &mut Context<Self>) -> AnyElement {
+        let feed_id = feed.id;
+        let progress = self.cache_progress.get(&feed_id);
+        let running = progress.is_some_and(OfflineCacheProgress::is_running);
+        let (label, color) = match progress {
+            Some(progress) if !progress.finished => (progress.button_label(), ACCENT),
+            Some(progress) if progress.failed > 0 => (progress.button_label(), DANGER),
+            Some(progress) if progress.pending > 0 => (progress.button_label(), WARN),
+            Some(progress) => (progress.button_label(), SUBTLE),
+            None => ("缓存".to_string(), MUTED),
+        };
+        div()
+            .id(("feed-cache", feed_id as u64))
+            .role(Role::Button)
+            .aria_label(format!("离线缓存「{}」的原文与译文", feed.title))
+            .px_1()
+            .py_1()
+            .rounded_sm()
+            .text_xs()
+            .text_color(rgb(color))
+            .when(running, |element| element.bg(rgb(BORDER)))
+            .when(!running, |element| {
+                element
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // 按钮嵌在整行“选中订阅”的可点击区域里，必须阻止事件冒泡，
+                // 否则点缓存会顺带切换当前订阅。
+                cx.stop_propagation();
+                this.cache_feed(feed_id, cx);
+            }))
+            .child(label)
+            .into_any_element()
     }
 
     fn sidebar_empty() -> Div {

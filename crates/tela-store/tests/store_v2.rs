@@ -1,4 +1,4 @@
-//! schema v2 与真实同步语义：快照/增量、删除级联、离线队列、正文缓存、旧库迁移。
+//! schema v4 与真实同步语义：快照/增量、删除级联、离线队列、正文/译文/图片缓存、旧库迁移。
 
 use tela_proto::{
     ArticleRow, FeedRow, Mutation, Removed, SiteRow, StateRow, SubscriptionRow, SyncResponse,
@@ -331,7 +331,126 @@ fn body_cache_round_trips() {
 }
 
 #[test]
-fn v1_mock_database_is_migrated_to_v2() {
+fn translation_cache_round_trips_and_is_kept_on_clear_account() {
+    let mut store = store();
+    assert!(
+        store
+            .get_translation("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "zh-Hans")
+            .unwrap()
+            .is_none()
+    );
+    store
+        .put_translation(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "zh-Hans",
+            "done",
+            Some(r#"{"format":1,"lang":"zh-Hans","status":"done"}"#),
+        )
+        .unwrap();
+    let cached = store
+        .get_translation("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "zh-Hans")
+        .unwrap()
+        .expect("译文快照应已写入");
+    assert_eq!(cached.state, "done");
+    assert!(cached.object.as_deref().unwrap().contains("\"done\""));
+
+    // pending → done 覆盖写，不产生第二行。
+    store
+        .put_translation(
+            "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "zh-Hans",
+            "partial",
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .get_translation("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "zh-Hans")
+            .unwrap()
+            .unwrap()
+            .state,
+        "partial"
+    );
+    assert_eq!(store.translation_count().unwrap(), 1);
+    assert_eq!(
+        store
+            .translation_count_for("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+            .unwrap(),
+        1
+    );
+
+    store.clear_account().unwrap();
+    assert_eq!(store.translation_count().unwrap(), 1, "登出保留离线缓存");
+}
+
+#[test]
+fn image_cache_round_trips_and_is_kept_on_clear_account() {
+    let mut store = store();
+    assert!(store.get_image("/img/abc/1").unwrap().is_none());
+    store
+        .put_image("/img/abc/1", &[0x89, b'P', b'N', b'G', 1, 2, 3])
+        .unwrap();
+    assert_eq!(
+        store.get_image("/img/abc/1").unwrap().as_deref(),
+        Some(&[0x89, b'P', b'N', b'G', 1, 2, 3][..])
+    );
+    // 覆盖写不产生第二行。
+    store.put_image("/img/abc/1", b"new-bytes").unwrap();
+    assert_eq!(
+        store.get_image("/img/abc/1").unwrap().as_deref(),
+        Some(&b"new-bytes"[..])
+    );
+    assert_eq!(store.image_count().unwrap(), 1);
+
+    store.clear_account().unwrap();
+    assert_eq!(store.image_count().unwrap(), 1, "登出保留离线图片");
+}
+
+#[test]
+fn v2_database_is_upgraded_without_losing_body_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+             INSERT INTO meta (key, value) VALUES ('schema_version', 2);
+             CREATE TABLE sync_rows (entity TEXT NOT NULL, row_key TEXT NOT NULL,
+                                     body TEXT NOT NULL, PRIMARY KEY (entity, row_key));
+             INSERT INTO sync_rows VALUES ('articles', '1', '{}');
+             CREATE TABLE pending_mutations (seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                                             mid TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+                                             body TEXT NOT NULL);
+             CREATE TABLE bodies (content_key TEXT PRIMARY KEY NOT NULL,
+                                  body TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+             INSERT INTO bodies VALUES ('ffffffffffffffffffffffffffffffff', '{}', 0);",
+        )
+        .unwrap();
+    }
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version(), LATEST_SCHEMA_VERSION);
+    assert_eq!(
+        store
+            .get_body("ffffffffffffffffffffffffffffffff")
+            .unwrap()
+            .as_deref(),
+        Some("{}"),
+        "升级只补新表，不丢正文缓存"
+    );
+    // 新表可用。
+    store
+        .put_translation("ffffffffffffffffffffffffffffffff", "zh-Hans", "none", None)
+        .unwrap();
+    assert_eq!(store.translation_count().unwrap(), 1);
+    store.put_image("/img/ffff/1", b"png").unwrap();
+    assert_eq!(
+        store.get_image("/img/ffff/1").unwrap().as_deref(),
+        Some(&b"png"[..])
+    );
+}
+
+#[test]
+fn v1_mock_database_is_migrated_to_latest() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("old.db");
     {

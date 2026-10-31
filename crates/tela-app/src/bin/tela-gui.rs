@@ -101,7 +101,8 @@ fn main() {
     let data: Arc<dyn ShellData> = services.clone();
     let accounts: Arc<dyn AccountService> = services.clone();
     let content = services.content();
-    run(GuiApp::with_accounts(data, content, accounts));
+    let offline_cache = services.offline_cache();
+    run(GuiApp::with_accounts(data, content, accounts).with_offline_cache(offline_cache));
 }
 
 /// 启动失败：终端 + 数据目录里的日志各留一份，然后按错误码退出。

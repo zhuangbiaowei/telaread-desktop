@@ -7,6 +7,8 @@
 //! 边界：本 crate 负责装配，不实现视图；视图语义在 `tela-ui`，
 //! 同步/存储语义分别在 `tela-sync` / `tela-store`。
 
+pub mod content_cache;
 pub mod services;
 
+pub use content_cache::CachingContentApi;
 pub use services::{AppConfig, AppServices};

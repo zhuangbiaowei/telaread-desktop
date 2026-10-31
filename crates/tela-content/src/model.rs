@@ -215,6 +215,34 @@ impl TranslationState {
     pub fn is_ready(self) -> bool {
         matches!(self, Self::Done | Self::Partial)
     }
+
+    /// wire 小写状态（写本地缓存/诊断用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Running => "running",
+            Self::Waiting => "waiting",
+            Self::Done => "done",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 从本地缓存读回状态；未知取值按 [`Self::Unknown`] 处理（open enum）。
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "requested" => Self::Requested,
+            "running" => Self::Running,
+            "waiting" => Self::Waiting,
+            "done" => Self::Done,
+            "partial" => Self::Partial,
+            "failed" => Self::Failed,
+            "skipped" => Self::Skipped,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 /// `rows.translations` 的同形结构 / `GET /v1/translations/{key}/{lang}` 里的值。
