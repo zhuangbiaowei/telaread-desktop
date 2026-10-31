@@ -2,8 +2,9 @@
 #
 # 流程：
 #   1. verify：校验 tag 与 Cargo 版本一致，并在 Linux 上跑完整测试；
-#   2. build：ubuntu-24.04 + windows-latest 原生构建 tela-app / tela-gui；
-#   3. release：汇总两个平台的压缩包，创建 GitHub Release。
+#   2. build：ubuntu-24.04 + windows-latest + macOS（Apple Silicon / Intel）
+#      原生构建 tela-app / tela-gui；
+#   3. release：汇总四个平台的压缩包，创建 GitHub Release。
 #
 # 约定：
 #   - tag 形如 v0.2.0；预发布可用 v0.2.0-rc.1（自动标记 prerelease）；
@@ -95,6 +96,14 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: zip
+          # macOS 分别用 Apple Silicon 与 Intel runner 原生构建；不要在 arm64
+          # runner 上交叉编译 x86_64，GPUI / WGPU / aws-lc 的 C 依赖更容易踩坑。
+          - os: macos-15
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
     steps:
       - uses: actions/checkout@v4
 
@@ -181,17 +190,23 @@ jobs:
           }
           Write-Host 'OK: tela-app.exe / tela-gui.exe 均不引用 VC++ 运行库 DLL。'
 
-      - name: Package (Linux)
-        if: runner.os == 'Linux'
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist/package
           cp target/release/tela-app target/release/tela-gui \
              README.md LICENSE-MIT LICENSE-APACHE dist/package/
+          chmod +x dist/package/tela-app dist/package/tela-gui
           name="tela-desktop-${GITHUB_REF_NAME}-${MATRIX_TARGET}.tar.gz"
           tar -C dist/package -czf "dist/${name}" .
-          (cd dist && sha256sum "${name}" > "${name}.sha256")
+          # macOS runner 默认只有 BSD 的 shasum，没有 sha256sum。
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${name}" > "${name}.sha256")
+          else
+            (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
+          fi
 
       - name: Package (Windows)
         if: runner.os == 'Windows'

@@ -1,0 +1,5 @@
+# macOS 15 的 Intel runner 是 GitHub 官方镜像（不是 self-hosted），
+# 但部分 actionlint 版本的标签表还没收录；显式声明以免本地/CI 误报。
+self-hosted-runner:
+  labels:
+    - macos-15-intel

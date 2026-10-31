@@ -60,7 +60,7 @@ cargo run -p tela-app -- demo --chapter mock-long
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.3.2
+cargo run -p tela-app -- --version                        # tela-app 0.3.3
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -154,27 +154,37 @@ TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.3.2 -m "Tela Desktop v0.3.2"
-git push origin v0.3.2
+git tag -a v0.3.3 -m "Tela Desktop v0.3.3"
+git push origin v0.3.3
 ```
 
 推送 tag 后：
 
 1. 在 Linux 上校验 tag/版本并跑完整测试；
-2. 在 `ubuntu-24.04` 与 `windows-latest` 原生构建 `tela-app` 与 `tela-gui`；
-3. 生成 `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz`、
-   `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip` 及对应 `.sha256`；
+2. 在 `ubuntu-24.04`、`windows-latest`、`macos-15`（Apple Silicon）与
+   `macos-15-intel`（Intel）四个平台原生构建 `tela-app` 与 `tela-gui`；
+3. 生成
+   `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz`、
+   `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip`、
+   `tela-desktop-<tag>-aarch64-apple-darwin.tar.gz`、
+   `tela-desktop-<tag>-x86_64-apple-darwin.tar.gz` 及对应 `.sha256`；
 4. 创建 GitHub Release（自动生成 release notes）。
 
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.3.2-rc.1 -m "Tela Desktop v0.3.2-rc.1"
-git push origin v0.3.2-rc.1
+git tag -a v0.3.3-rc.1 -m "Tela Desktop v0.3.3-rc.1"
+git push origin v0.3.3-rc.1
 ```
 
-Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建。
-当前不生成 macOS 产物。
+Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；
+macOS 提供 Apple Silicon 与 Intel 两个原生包，但**未签名、未公证**。首次运行若被
+Gatekeeper 拦截，可在解压目录执行：
+
+```bash
+xattr -dr com.apple.quarantine .
+./tela-gui
+```
 
 ### Windows 包是「解压即用」的
 
