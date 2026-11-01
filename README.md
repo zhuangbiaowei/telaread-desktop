@@ -1,5 +1,7 @@
 # Tela Desktop
 
+简体中文 | [English](./README.en.md)
+
 基于 [Tela](https://telaread.com) 的桌面阅读器（Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit)）。
 
 > **当前进度**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
