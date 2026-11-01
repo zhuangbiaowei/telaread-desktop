@@ -467,7 +467,7 @@ impl ShellView {
 
     /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客。
     ///
-    /// 阅读面板自己处理 `o/c/t/n/p/PageUp/PageDown`；这里只接管需要改
+    /// 阅读面板自己处理 `o/c/t/PageUp/PageDown/↑/↓`；这里只接管需要改
     /// 选中项的键，事件从阅读面板冒泡上来后调用。
     pub fn handle_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
         // 推荐弹窗是模态的：输入推荐语时外壳不应抢 j/k。

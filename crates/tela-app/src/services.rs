@@ -1229,8 +1229,8 @@ fn demo_sync(lang: &str) -> SyncResponse {
                 demo_article(
                     DEMO_ARTICLE_LONG,
                     DEMO_FEED_ID,
-                    "长章节：120 段分页演示",
-                    "这一章有 120 个段落，用来看长文分页与阅读位置保持。",
+                    "长章节：120 段连续滚动演示",
+                    "这一章有 120 个段落，用来看长文连续滚动与阅读位置保持。",
                     MOCK_LONG_CONTENT_KEY,
                     now + 200,
                 ),

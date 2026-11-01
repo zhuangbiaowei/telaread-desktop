@@ -1,4 +1,4 @@
-//! S3 阅读面板行为测试：异步加载、三视图、翻页、失败重试。
+//! S3 阅读面板行为测试：异步加载、三视图、连续滚动、失败重试。
 //!
 //! 用真实 GPUI 窗口 + mock 内容后端；不检查像素，只断言 ReaderSession 的状态
 //! 与视图方法的结果。这样“加载/重试错了”和“布局错了”能分开定位。
@@ -70,9 +70,12 @@ fn loads_chapter_in_background_and_switches_views(cx: &mut TestAppContext) {
         let state = reader.session();
         assert!(state.state().is_ready());
         assert_eq!(state.total_paragraphs(), 5);
+        assert_eq!(
+            state.all_rows().len(),
+            5,
+            "桌面端一次渲染整篇，5 段必须全部可读"
+        );
         assert_eq!(state.mode(), ViewMode::Compare);
-        assert_eq!(state.page(), 0);
-        assert_eq!(state.page_count(), 1);
         assert_eq!(
             reader.original_url(),
             Some("https://example.com/hello"),
@@ -82,7 +85,7 @@ fn loads_chapter_in_background_and_switches_views(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn view_mode_keys_and_paging_keep_anchor(cx: &mut TestAppContext) {
+fn view_mode_keys_keep_reading_position_without_paging(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
 
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
@@ -92,20 +95,13 @@ fn view_mode_keys_and_paging_keep_anchor(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    assert_eq!(
-        reader.read_with(cx, |reader, _| reader.session().total_paragraphs()),
-        120
-    );
-    assert_eq!(
-        reader.read_with(cx, |reader, _| reader.session().page_count()),
-        6
-    );
+    // 整篇 120 段一次全部可读：不再按 page_size 切片。
+    let all_rows = reader.read_with(cx, |reader, _| reader.session().all_rows());
+    assert_eq!(all_rows.len(), 120, "长章节必须整篇渲染，不能只渲染一页");
+    assert_eq!(all_rows.first().map(|row| row.index), Some(0));
+    assert_eq!(all_rows.last().map(|row| row.index), Some(119));
 
-    // 翻到第 2 页，然后切三种视图：页码/锚点不能变。
-    assert!(reader.update(cx, |reader, cx| reader.handle_key("n", cx)));
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 1);
-    let anchor = reader.read_with(cx, |reader, _| reader.session().anchor());
-
+    // 三视图切换：内容跟着变，阅读位置（anchor）不动。
     assert!(reader.update(cx, |reader, cx| reader.handle_key("t", cx)));
     assert_eq!(
         reader.read_with(cx, |reader, _| reader.session().mode()),
@@ -123,20 +119,14 @@ fn view_mode_keys_and_paging_keep_anchor(cx: &mut TestAppContext) {
     );
     assert_eq!(
         reader.read_with(cx, |reader, _| reader.session().anchor()),
-        anchor
+        0,
+        "没有段落分页后阅读位置始终从全文起点开始"
     );
 
-    // 末页不能再下一页；首页不能再上一页。
-    for _ in 0..4 {
-        assert!(reader.update(cx, |reader, cx| reader.handle_key("n", cx)));
-    }
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 5);
+    // 不再有 n / p 段落翻页键：按键不被消费，页码也不变。
     assert!(!reader.update(cx, |reader, cx| reader.handle_key("n", cx)));
-    for _ in 0..5 {
-        assert!(reader.update(cx, |reader, cx| reader.handle_key("p", cx)));
-    }
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 0);
     assert!(!reader.update(cx, |reader, cx| reader.handle_key("p", cx)));
+    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 0);
 }
 
 #[gpui::test]
@@ -416,7 +406,7 @@ fn offline_pauses_translation_polling_and_resumes_after_probe(cx: &mut TestAppCo
 }
 
 #[gpui::test]
-fn page_up_down_fall_back_to_paragraph_pages_without_layout(cx: &mut TestAppContext) {
+fn page_keys_scroll_instead_of_switching_paragraph_pages(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
 
     let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
@@ -426,11 +416,12 @@ fn page_up_down_fall_back_to_paragraph_pages_without_layout(cx: &mut TestAppCont
     });
     cx.run_until_parked();
 
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 0);
-    assert!(reader.update(cx, |reader, cx| reader.handle_key("pagedown", cx)));
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 1);
-    assert!(reader.update(cx, |reader, cx| reader.handle_key("pagedown", cx)));
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 2);
-    assert!(reader.update(cx, |reader, cx| reader.handle_key("pageup", cx)));
-    assert_eq!(reader.read_with(cx, |reader, _| reader.session().page()), 1);
+    // 没有布局（视口高度为 0）时无法滚动，但绝不能退回“切段落页”。
+    assert!(!reader.update(cx, |reader, cx| reader.handle_key("pagedown", cx)));
+    assert!(!reader.update(cx, |reader, cx| reader.handle_key("pageup", cx)));
+    assert_eq!(
+        reader.read_with(cx, |reader, _| reader.session().page()),
+        0,
+        "PageDown/PageUp 只滚动正文，不再切段落页"
+    );
 }

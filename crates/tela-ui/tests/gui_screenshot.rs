@@ -58,10 +58,12 @@ impl ShellData for DemoData {
                     id: 43,
                     feed_id: 1,
                     url: Some("https://example.com/articles/43".to_string()),
-                    title: "长章节：120 段分页演示".to_string(),
+                    title: "长章节：120 段连续滚动演示".to_string(),
                     unread: true,
                     published_at: Some(1_761_350_600),
-                    excerpt: Some("这一章有 120 个段落，用来看长文分页与阅读位置保持。".to_string()),
+                    excerpt: Some(
+                        "这一章有 120 个段落，用来看长文连续滚动与阅读位置保持。".to_string(),
+                    ),
                 },
                 ArticleItem {
                     id: 44,

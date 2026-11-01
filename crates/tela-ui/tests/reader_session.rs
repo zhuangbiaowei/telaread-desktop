@@ -155,6 +155,28 @@ fn long_chapter_pages_cover_every_paragraph_exactly_once() {
     assert_eq!(session.anchor(), 100, "末页锚点停在最后一段页首");
 }
 
+/// 桌面端连续阅读：`all_rows` 一次给全，顺序必须与逐页拼起来完全一致。
+#[test]
+fn all_rows_returns_the_whole_chapter_in_order() {
+    let mut paged = paged_session_with(MockContentApi::new(), MOCK_LONG_CONTENT_KEY, 20);
+    paged.load();
+    let mut stitched = row_indices(&paged);
+    while paged.next_page() {
+        stitched.extend(row_indices(&paged));
+    }
+
+    let mut session = session_with(MockContentApi::new(), MOCK_LONG_CONTENT_KEY);
+    session.load();
+    let all: Vec<usize> = session.all_rows().iter().map(|row| row.index).collect();
+
+    assert_eq!(
+        all, stitched,
+        "all_rows 必须与逐页拼起来的内容完全一致（不重不漏、顺序不变）"
+    );
+    assert_eq!(all, (0..120).collect::<Vec<_>>());
+    assert_eq!(session.anchor(), 0, "连续阅读不需要移动分页锚点");
+}
+
 /// 跳页与按段落定位：越界自动夹到合法范围，锚点始终是页首。
 #[test]
 fn page_navigation_clamps_at_bounds_and_keeps_anchor_on_page_start() {

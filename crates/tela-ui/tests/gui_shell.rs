@@ -14,7 +14,7 @@ use gpui::{
     px, size,
 };
 use tela_content::api::{ChapterRequest, ContentApi};
-use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
+use tela_content::mock::{MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
 use tela_ui::shell::{
@@ -369,6 +369,71 @@ fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
         window.draw(cx).clear(cx);
     })
     .unwrap();
+}
+
+/// 长文连续阅读：一直按 PageDown 必须能一路滚到全文末尾，中途不切段落页。
+#[gpui::test]
+fn page_down_reaches_the_end_of_a_long_article_without_paging(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 1, 1)],
+        articles: HashMap::from([(1, vec![article(43, 1, "长章节")])]),
+        content_key: Some(MOCK_LONG_CONTENT_KEY.to_string()),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    // 用较大的窗口：阅读区更宽、每段行数更少，测试不必逐屏按上百次。
+    let (window, view) = open_window_sized(cx, size(px(1440.), px(900.)), move |_, cx| {
+        cx.new(|cx| ShellView::new(data_for_view, content(), cx))
+    });
+
+    // 首帧拿焦点，第二帧让整篇正文进入布局。
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    let offset =
+        |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).reader().read(cx).scroll_offset().y);
+    let page =
+        |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).reader().read(cx).session().page());
+    let rows = |cx: &mut TestAppContext| {
+        cx.update(|cx| view.read(cx).reader().read(cx).session().all_rows().len())
+    };
+
+    assert_eq!(rows(cx), 120, "120 段长文必须一次全部渲染");
+    assert_eq!(offset(cx), px(0.), "打开文章从顶部开始");
+
+    // 一路 PageDown：每次都继续向下，直到文末（再按不再移动）为止。
+    let mut last = offset(cx);
+    let mut steps = 0;
+    loop {
+        cx.simulate_keystrokes(window, "pagedown");
+        let now = offset(cx);
+        assert_eq!(page(cx), 0, "连续滚动不能切段落页");
+        if now == last {
+            break;
+        }
+        assert!(now < last, "PageDown 必须持续向下滚动");
+        last = now;
+        steps += 1;
+        assert!(steps < 200, "长文应在有限次 PageDown 内读完，不能死循环");
+    }
+    assert!(
+        steps > 3,
+        "120 段正文应跨多屏，实际只滚了 {steps} 屏（可能只渲染了一页）"
+    );
+    assert!(last < px(-1000.), "必须真的滚到长文深处，实际 {last:?}");
+
+    // 到文末后 PageUp 能往回滚，证明滚动范围覆盖全文而不是卡死。
+    cx.simulate_keystrokes(window, "pageup");
+    assert!(offset(cx) > last, "PageUp 应向上回滚");
 }
 
 /// 点击缓存按钮后：后台回调进度、完成后显示提示，且不会切换当前订阅。

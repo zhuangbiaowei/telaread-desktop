@@ -259,12 +259,23 @@ impl ReaderDocument {
         })
     }
 
-    /// 取一页渲染行（分页/懒加载用），`offset` 越界时返回空 `Vec`。
+    /// 取一页渲染行（终端分页 / 长文按需渲染用），`offset` 越界时返回空 `Vec`。
     pub fn rows(&self, mode: ViewMode, offset: usize, limit: usize) -> Vec<ReaderRow> {
         self.paragraphs
             .iter()
             .skip(offset)
             .take(limit)
+            .filter_map(|p| self.row(p.index, mode))
+            .collect()
+    }
+
+    /// 取整篇渲染行（桌面端连续滚动阅读用，不分页）。
+    ///
+    /// 段落顺序、索引与 [`Self::rows`] 完全一致；一次给全，界面不需要
+    /// 再维护“当前第几页”，用户一直按 PgDn / ↓ 就能读完。
+    pub fn all_rows(&self, mode: ViewMode) -> Vec<ReaderRow> {
+        self.paragraphs
+            .iter()
             .filter_map(|p| self.row(p.index, mode))
             .collect()
     }

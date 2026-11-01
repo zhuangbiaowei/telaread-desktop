@@ -295,10 +295,22 @@ impl ReaderSession {
         self.anchor = (index / self.page_size) * self.page_size;
     }
 
-    /// 当前页的渲染行。
+    /// 当前页的渲染行（终端分页用）。
     pub fn visible_rows(&self) -> Vec<ReaderRow> {
         match &self.state {
             ReaderState::Ready(doc) => doc.rows(self.mode, self.anchor, self.page_size),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 整篇的渲染行（桌面端连续滚动阅读用，不分页）。
+    ///
+    /// 与 [`Self::visible_rows`] 交付的段落内容、顺序和索引完全一致，只是
+    /// 不按 `page_size` 切片：调用方一次拿到全文，用户一直按 PgDn / ↓
+    /// 就能读完，不需要“上一页 / 下一页”。
+    pub fn all_rows(&self) -> Vec<ReaderRow> {
+        match &self.state {
+            ReaderState::Ready(doc) => doc.all_rows(self.mode),
             _ => Vec::new(),
         }
     }

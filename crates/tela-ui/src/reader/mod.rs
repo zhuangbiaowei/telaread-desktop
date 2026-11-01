@@ -2,7 +2,9 @@
 //!
 //! 职责边界（docs/development_plan.md §5）：只消费 `tela-content` 的 `Chapter`，
 //! 不直接发 HTTP、不持有 mock 数据；三种视图（原文 / 对照 / 译文）与加载态、
-//! 空章节、失败重试、长章节分页都收敛在这一层，便于无显示器环境下用纯逻辑测试。
+//! 空章节、失败重试、按需分页都收敛在这一层，便于无显示器环境下用纯逻辑测试。
+//! 桌面端一次取整篇连续滚动（[`ReaderSession::all_rows`]），终端仍可逐页消费
+//! （[`ReaderSession::visible_rows`]），两者共用同一份段落对齐与视图语义。
 
 pub mod document;
 pub mod page;

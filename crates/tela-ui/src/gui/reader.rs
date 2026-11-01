@@ -1,8 +1,10 @@
-//! 阅读面板（S3）：把 [`ReaderSession`] 接到 GPUI，负责异步取数、三视图、翻页与重试。
+//! 阅读面板（S3）：把 [`ReaderSession`] 接到 GPUI，负责异步取数、三视图、连续滚动与重试。
 //!
 //! 关键边界：
 //! - 正文取数在后台执行器里跑，**不阻塞渲染线程**；
-//! - 语义仍由 [`ReaderSession`] 决定（段落对齐、三视图、阅读位置），GUI 只画 `ReaderRow`；
+//! - 语义仍由 [`ReaderSession`] 决定（段落对齐、三视图、阅读位置），GUI 只画渲染缓存里的行；
+//! - 正文一次渲染整篇、不做段落分页：PageUp/PageDown 与 ↑/↓ 只滚动视口，
+//!   用户一路按下去就能读完，顶部不显示页码；
 //! - 每次加载带 generation，切文章时旧请求的结果会被丢弃，避免“慢请求覆盖新文章”；
 //! - 图片通过 `ContentApi::load_image` 带认证下载，解码后走 `ImageSource::Image`，
 //!   不把远程 URL 直接交给 GPUI（否则会绕过认证与缓存）；
@@ -16,9 +18,9 @@ use std::time::Duration;
 use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::model::TranslationAnswerStatus;
 
+use crate::reader::ViewMode;
 use crate::reader::document::{ReaderDocument, TranslationStatus, preformatted_text};
 use crate::reader::session::{ReaderSession, ReaderState};
-use crate::reader::{ReaderRow, ViewMode};
 use crate::shell::{RecommendationItem, RecommendationService, ShellData};
 
 use gpui_kit::base::input::{InputEditorStyle, TextareaState};
@@ -68,6 +70,22 @@ struct RecommendDialog {
     editing: bool,
 }
 
+/// 一段正文的渲染缓存。
+///
+/// 把原文/译文的 HTML 预先转成 `SharedString` 缓存下来：滚动时不用每帧
+/// 从段落数据重新分配整篇正文的字符串，`TextView` 也能复用同一个分配，
+/// 快速判断“文本没变”而跳过重复设置。
+struct RenderedRow {
+    /// 块索引（作为稳定的元素 id 后缀）。
+    index: usize,
+    /// 语义标签（代码块判断用）。
+    tag: String,
+    /// 原文 HTML。
+    original_html: SharedString,
+    /// 译文 HTML；缺译文时复用原文（与阅读规则一致）。
+    translation_html: SharedString,
+}
+
 /// 阅读面板视图。
 pub struct ReaderView {
     data: Arc<dyn ShellData>,
@@ -96,6 +114,8 @@ pub struct ReaderView {
     scroll_handle: ScrollHandle,
     /// 当前窗口正文的行高，渲染时更新；Up/Down 每次滚一行。
     line_height: Pixels,
+    /// 当前文章 + 视图下的渲染缓存；文章/视图/译文变化时重建。
+    rendered_rows: Vec<RenderedRow>,
     /// 推荐写能力；为空时不显示推荐按钮。
     recommendations: Option<Arc<dyn RecommendationService>>,
     /// 当前文章的推荐（未推荐时为 `None`）。
@@ -149,6 +169,7 @@ impl ReaderView {
             image_tasks: Vec::new(),
             scroll_handle: ScrollHandle::new(),
             line_height: px(24.),
+            rendered_rows: Vec::new(),
             recommendations,
             recommendation: None,
             recommend_dialog: None,
@@ -246,11 +267,13 @@ impl ReaderView {
         match self.data.chapter_request(article_id) {
             Ok(request) => {
                 self.session.reset_to(request);
+                self.rebuild_rendered_rows();
                 self.spawn_load(cx);
             }
             Err(error) => {
                 // 本地没有正文对象：直接进入失败态，错误页里的“重试”仍有意义。
                 self.session.apply_load_result(Err(error));
+                self.rebuild_rendered_rows();
                 cx.notify();
             }
         }
@@ -270,6 +293,7 @@ impl ReaderView {
                 Err(error) => {
                     self.session.mark_retry();
                     self.session.apply_load_result(Err(error));
+                    self.rebuild_rendered_rows();
                     cx.notify();
                     return;
                 }
@@ -281,6 +305,7 @@ impl ReaderView {
         self.translation_task = None;
         self.session.mark_retry();
         self.session.begin_load();
+        self.rebuild_rendered_rows();
         self.spawn_load(cx);
         cx.notify();
     }
@@ -291,67 +316,71 @@ impl ReaderView {
             return false;
         }
         self.session.set_mode(mode);
+        self.rebuild_rendered_rows();
         true
     }
 
-    /// 段落分页的下一页；返回是否变化。新页面从顶部开始。
-    pub fn next_page(&mut self) -> bool {
-        let changed = self.session.next_page();
-        if changed {
-            self.scroll_handle.set_offset(Point {
-                x: px(0.),
-                y: px(0.),
-            });
-        }
-        changed
+    /// 重建正文渲染缓存（文章 / 视图 / 译文变化后调用）。
+    ///
+    /// 缓存的是 `SharedString` 而不是 `String`：滚动时同一段 HTML 的分配不变，
+    /// 不必每帧重新拷贝整篇正文，`TextView` 也能快速识别文本未变化。
+    fn rebuild_rendered_rows(&mut self) {
+        self.rendered_rows = self
+            .session
+            .all_rows()
+            .into_iter()
+            .map(|row| {
+                let original_html = SharedString::from(row.original_html);
+                // 缺译文时回退原文；直接复用同一个 SharedString，省一份拷贝。
+                let translation_html = match row.translation_html {
+                    Some(html) => SharedString::from(html),
+                    None => original_html.clone(),
+                };
+                RenderedRow {
+                    index: row.index,
+                    tag: row.tag,
+                    original_html,
+                    translation_html,
+                }
+            })
+            .collect();
     }
 
-    /// 段落分页的上一页；返回是否变化。新页面停在底部，接着往上读。
-    pub fn prev_page(&mut self) -> bool {
-        let changed = self.session.prev_page();
-        if changed {
-            self.scroll_handle.scroll_to_bottom();
-        }
-        changed
-    }
-
-    /// PageDown：先按视口高度向下滚；到底后再切到下一段落页。
+    /// PageDown：按视口高度向下连续滚动；已经在文末返回 `false`。
     pub fn page_down(&mut self) -> bool {
-        let offset = self.scroll_handle.offset();
-        let max = self.scroll_handle.max_offset().y;
-        if max > px(1.) && offset.y > -max + px(1.) {
-            let step = page_step(self.scroll_handle.bounds().size.height);
-            let target = (offset.y - step).max(-max);
-            self.scroll_handle.set_offset(Point {
-                x: offset.x,
-                y: target,
-            });
-            return true;
-        }
-        self.next_page()
+        self.scroll_by_page(-1.)
     }
 
-    /// PageUp：先按视口高度向上滚；到顶后再切到上一段落页的底部。
+    /// PageUp：按视口高度向上连续滚动；已经在文首返回 `false`。
     pub fn page_up(&mut self) -> bool {
-        let offset = self.scroll_handle.offset();
-        if offset.y < px(-1.) {
-            let step = page_step(self.scroll_handle.bounds().size.height);
-            let target = (offset.y + step).min(px(0.));
-            self.scroll_handle.set_offset(Point {
-                x: offset.x,
-                y: target,
-            });
-            return true;
-        }
-        self.prev_page()
+        self.scroll_by_page(1.)
     }
 
-    /// ↑：向上滚动一行（不跨段落页）。
+    /// 按视口高度滚动一屏（`-1` 向下、`1` 向上），并夹在正文范围内。
+    ///
+    /// 桌面阅读面板一次渲染整篇，没有段落分页；PageUp/PageDown 只做纯滚动，
+    /// 因此可以一路按到底读完，不会在“页边界”处跳一下或重置阅读位置。
+    fn scroll_by_page(&mut self, direction: f32) -> bool {
+        let offset = self.scroll_handle.offset();
+        let max = self.scroll_handle.max_offset().y.max(px(0.));
+        let step = page_step(self.scroll_handle.bounds().size.height) * direction;
+        let target_y = (offset.y + step).clamp(-max, px(0.));
+        if target_y == offset.y {
+            return false;
+        }
+        self.scroll_handle.set_offset(Point {
+            x: offset.x,
+            y: target_y,
+        });
+        true
+    }
+
+    /// ↑：向上滚动一行（不跳页）。
     pub fn line_up(&mut self) -> bool {
         self.scroll_lines(1.)
     }
 
-    /// ↓：向下滚动一行（不跨段落页）。
+    /// ↓：向下滚动一行（不跳页）。
     pub fn line_down(&mut self) -> bool {
         self.scroll_lines(-1.)
     }
@@ -502,8 +531,11 @@ impl ReaderView {
         self.recommendation = self.data.recommendation(article_id).ok().flatten();
     }
 
-    /// 键盘快捷键：`o` 原文 / `c` 对照 / `t` 译文 / `n` 段落下一页 / `p` 段落上一页 /
-    /// `PageUp`/`PageDown` 视口滚动（到头再切段落页）/ `↑`/`↓` 逐行滚动 / `r` 重试。
+    /// 键盘快捷键：`o` 原文 / `c` 对照 / `t` 译文 /
+    /// `PageUp`/`PageDown` 按视口滚动 / `↑`/`↓` 逐行滚动 / `r` 重试。
+    ///
+    /// 正文一次渲染整篇，没有段落分页，所以不再有 `n`/`p` 翻页键；
+    /// 一直按 `PageDown` 或 `↓` 就能从开头读到结尾。
     ///
     /// 返回是否发生变化；调用方负责 `cx.notify()`。
     pub fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
@@ -515,8 +547,6 @@ impl ReaderView {
             "o" => self.set_mode(ViewMode::Original),
             "c" => self.set_mode(ViewMode::Compare),
             "t" => self.set_mode(ViewMode::Translation),
-            "n" => self.next_page(),
-            "p" => self.prev_page(),
             "up" => self.line_up(),
             "down" => self.line_down(),
             "pagedown" => self.page_down(),
@@ -543,6 +573,7 @@ impl ReaderView {
                 // 文章的快速切换会让旧请求晚到；generation 不匹配就丢弃。
                 if reader.generation == generation {
                     reader.session.apply_load_result(result);
+                    reader.rebuild_rendered_rows();
                     reader.after_load(cx);
                     cx.notify();
                 }
@@ -730,6 +761,7 @@ impl ReaderView {
                         return;
                     }
                     reader.session.apply_load_result(Ok(chapter));
+                    reader.rebuild_rendered_rows();
                     reader.translation_notice = Some(translation_notice_for(status));
                     if done {
                         reader.requested_translations.remove(&key);
@@ -841,12 +873,12 @@ impl ReaderView {
 
         let title = self.title.clone().unwrap_or_else(|| "阅读".to_string());
         let status = self.session.state().status_label();
-        let page = self.session.page() + 1;
-        let pages = self.session.page_count();
-        let page_suffix = if pages > 1 {
-            format!(" · 第 {page}/{pages} 页")
+        let total_paragraphs = self.session.total_paragraphs();
+        // 正文一次渲染整篇，顶部不再出现页码：只留译文状态与段落总数。
+        let status_line = if total_paragraphs > 0 {
+            format!("{status} · 共 {total_paragraphs} 段")
         } else {
-            String::new()
+            status
         };
         let mode = self.session.mode();
 
@@ -877,8 +909,6 @@ impl ReaderView {
             );
         }
 
-        let can_prev = self.session.page() > 0;
-        let can_next = self.session.page() + 1 < pages;
         let notice = self.translation_notice.clone();
         let link_notice = self.link_notice.clone();
         let recommend_notice = self.recommend_notice.clone();
@@ -943,12 +973,7 @@ impl ReaderView {
                                         row.child(self.recommend_button(cx))
                                     }),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(SUBTLE))
-                                    .child(format!("{status}{page_suffix}")),
-                            )
+                            .child(div().text_xs().text_color(rgb(SUBTLE)).child(status_line))
                             .when_some(notice, |element, notice| {
                                 element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
                             })
@@ -962,39 +987,10 @@ impl ReaderView {
                     .child(h_flex().items_center().gap_1().children(modes)),
             )
             .child(
-                h_flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format!("共 {} 段", self.session.total_paragraphs())),
-                    )
-                    // 只有一段分页时不要显示“上一页 1/1 下一页”：正文超出
-                    // 一屏也没关系，PageUp/PageDown 会按视口滚动。
-                    .when(pages > 1, |row| {
-                        row.child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(Self::nav_button("上一页", can_prev, cx, true))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(SUBTLE))
-                                        .child(format!("{page}/{pages}")),
-                                )
-                                .child(Self::nav_button("下一页", can_next, cx, false)),
-                        )
-                    }),
-            )
-            .child(
                 div()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · ↑/↓ 逐行 · PgUp/PgDn 翻页"),
+                    .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · ↑/↓ 逐行 · PgUp/PgDn 滚动"),
             )
     }
 
@@ -1033,42 +1029,6 @@ impl ReaderView {
             .into_any_element()
     }
 
-    fn nav_button(
-        label: &'static str,
-        enabled: bool,
-        cx: &mut Context<Self>,
-        prev: bool,
-    ) -> impl IntoElement {
-        div()
-            .id(if prev {
-                "reader-page-prev"
-            } else {
-                "reader-page-next"
-            })
-            .role(Role::Button)
-            .aria_label(label)
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .when(enabled, |element| {
-                element
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(BORDER)))
-            })
-            .when(!enabled, |element| element.opacity(0.4))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let changed = if prev {
-                    this.prev_page()
-                } else {
-                    this.next_page()
-                };
-                if changed {
-                    cx.notify();
-                }
-            }))
-            .child(label)
-    }
-
     fn body(&self, cx: &mut Context<Self>) -> Div {
         if self.article_id.is_none() {
             return self.centered_note("选择一篇文章开始阅读", "左侧选订阅，中间选文章。");
@@ -1089,7 +1049,9 @@ impl ReaderView {
 
     fn ready_body(&self) -> Div {
         let mode = self.session.mode();
-        let rows = self.session.visible_rows();
+        // 整篇一次渲染：不分页、不切页，一直按 PgDn / ↓ 就能读到结尾。
+        // 行文本用缓存好的 SharedString，滚动时不会重新解析 HTML。
+        let rows = &self.rendered_rows;
         let mut list = v_flex()
             .id("reader-scroll")
             .flex_1()
@@ -1105,13 +1067,25 @@ impl ReaderView {
                 div()
                     .text_sm()
                     .text_color(rgb(MUTED))
-                    .child("这一页没有可显示的段落。"),
+                    .child("这篇文章没有可显示的段落。"),
             );
         } else {
             list = list.child(self.column_header(mode));
-            for row in &rows {
+            for row in rows {
                 list = list.child(self.row_block(row, mode));
             }
+            // 结尾标记：给读者一个明确的“读完了”信号，避免以为还有内容没加载。
+            list = list.child(
+                div()
+                    .w_full()
+                    .max_w(px(READING_MAX_WIDTH))
+                    .pt_8()
+                    .pb_4()
+                    .text_xs()
+                    .text_center()
+                    .text_color(rgb(MUTED))
+                    .child("— 全文完 —"),
+            );
         }
         v_flex().flex_1().min_h_0().child(list)
     }
@@ -1153,7 +1127,7 @@ impl ReaderView {
         }
     }
 
-    fn row_block(&self, row: &ReaderRow, mode: ViewMode) -> Div {
+    fn row_block(&self, row: &RenderedRow, mode: ViewMode) -> Div {
         let original = self.block_view(
             format!("reader-original-{}", row.index),
             row.original_html.clone(),
@@ -1162,13 +1136,9 @@ impl ReaderView {
 
         // 缺译文时回退原文（代码/图片/超额段落仍然可读）；顶部状态条会说明
         // 整篇存在未翻译段落，不在每段中间插占位句。
-        let translation_html = row
-            .translation_html
-            .clone()
-            .unwrap_or_else(|| row.original_html.clone());
         let translation = self.block_view(
             format!("reader-translation-{}", row.index),
-            translation_html,
+            row.translation_html.clone(),
             &row.tag,
         );
 
@@ -1195,7 +1165,7 @@ impl ReaderView {
     }
 
     /// 一个块 → 富文本元素；代码块单独渲染，其余按 HTML（标题/引用/链接/表格/图片）。
-    fn block_view(&self, id: String, html: String, tag: &str) -> AnyElement {
+    fn block_view(&self, id: String, html: SharedString, tag: &str) -> AnyElement {
         let is_code = tag == "pre" || html.trim_start().to_ascii_lowercase().starts_with("<pre");
         if is_code {
             return self.code_block(id, preformatted_text(&html));
@@ -1229,7 +1199,7 @@ impl ReaderView {
     }
 
     /// 一个块 → 富文本元素；标题、引用、链接、表格和图片按原 HTML 渲染。
-    fn rich_text(&self, id: String, html: String) -> impl IntoElement {
+    fn rich_text(&self, id: String, html: SharedString) -> impl IntoElement {
         let cache = Arc::clone(&self.image_cache);
         TextView::html(ElementId::Name(id.into()), html)
             .style(text_style())

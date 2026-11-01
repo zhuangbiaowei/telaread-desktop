@@ -103,7 +103,7 @@ cargo run -p tela-app -- demo --chapter mock-long
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.4.1
+cargo run -p tela-app -- --version                        # tela-app 0.4.2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -155,16 +155,15 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 
 - 未选择文章时显示「选择一篇文章开始阅读」；空章节、加载中、加载失败都有独立状态页。
 - 标题旁的 `↗` 用系统浏览器打开原文；打开失败会在标题下方提示。
-- 顶部显示译文状态（已就绪 / 翻译中 / 部分缺失 / 暂无译文）和段落总数；多页时附带
-  当前页/总页数，以及 `原文 | 对照 | 译文` 三个视图按钮。
+- 顶部显示译文状态（已就绪 / 翻译中 / 部分缺失 / 暂无译文）和段落总数，右侧是
+  `原文 | 对照 | 译文` 三个视图按钮；不显示页码，也没有「上一页 / 下一页」。
 - 对照视图按块左右对齐原文与译文；缺译文的块回退显示原文，并在状态里标出缺失段落数。
 - 正文按块渲染 HTML（标题、引用、列表、表格、链接、代码块、图片），文字可选中。
-- 长章节默认每页 20 段，可用「上一页 / 下一页」或 `n` / `p` 翻段落页；`PgUp` / `PgDn`
-  先按视口滚动，到边缘再切换段落页。
+- 文章一次渲染整篇、连续滚动：按住 `PgDn` 或 `↓` 一路按到底就能读完，结尾有「全文完」标记；
+  `PgUp` / `↑` 反向滚动，不会在页边界跳转或重置位置。
 - 没有译文时会自动向服务端请求并轮询；有译文后写回本地缓存，后续打开不再请求。
   今日额度用完或作者关闭翻译时，会在标题下方给出对应提示并继续显示原文。
-- 切换视图会保持当前阅读位置；翻页按段落页移动；加载失败显示错误详情与「重试」按钮，
-  快捷键 `r` 等效。
+- 切换视图会保持当前阅读位置；加载失败显示错误详情与「重试」按钮，快捷键 `r` 等效。
 
 ### 推荐
 
@@ -205,15 +204,15 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 ### 快捷键与鼠标
 
 - 全局：`j` / `k` 下一篇 / 上一篇；`Shift+J` / `Shift+K` 下一个 / 上一个博客。
-- 阅读：`o` 原文、`c` 对照、`t` 译文、`n` / `p` 段落下一页 / 上一页、`↑` / `↓` 逐行滚动、
-  `PgUp` / `PgDn` 按视口翻页、`r` 重试。
+- 阅读：`o` 原文、`c` 对照、`t` 译文、`↑` / `↓` 逐行滚动、
+  `PgUp` / `PgDn` 按视口滚动（一篇到底、不切页）、`r` 重试。
 - 鼠标：点击订阅/文章切换，滚轮滚动，正文文字可选中。
 
 ### 演示模式
 
 - `--demo` 或 `TELA_DEMO=1` 使用进程内 mock，不需要账号与网络。
 - 空库时自动写入 2 个订阅、4 篇文章（正常 / 长章节 / 无译文 / 已读），覆盖三视图、
-  长文分页、无译文回退与已读状态；`TELA_DEV_SEED=0` 可关闭演示数据写入。
+  长文连续滚动、无译文回退与已读状态；`TELA_DEV_SEED=0` 可关闭演示数据写入。
 - 演示数据还包含 1 条推荐，可直接查看「我的推荐」列表；演示模式没有账号，推荐/取消推荐
   会提示需要登录（写操作不会落库）。
 
@@ -302,8 +301,8 @@ SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.1 -m "Tela Desktop v0.4.1"
-git push origin v0.4.1
+git tag -a v0.4.2 -m "Tela Desktop v0.4.2"
+git push origin v0.4.2
 ```
 
 推送 tag 后：
@@ -321,8 +320,8 @@ git push origin v0.4.1
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.1-rc.1 -m "Tela Desktop v0.4.1-rc.1"
-git push origin v0.4.1-rc.1
+git tag -a v0.4.2-rc.1 -m "Tela Desktop v0.4.2-rc.1"
+git push origin v0.4.2-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；

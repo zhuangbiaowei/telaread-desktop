@@ -106,7 +106,7 @@ declares `rust-version = "1.92"`). `reqwest` uses rustls (aws-lc-rs), so the fir
 ```bash
 cargo build --workspace --locked                          # build
 cargo test --workspace --locked                           # all tests (including real API fixture contracts)
-cargo run -p tela-app -- --version                        # tela-app 0.4.1
+cargo run -p tela-app -- --version                        # tela-app 0.4.2
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -159,12 +159,12 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 
 - With no article selected it shows "Select an article to start reading"; empty chapters, loading and load failures each have their own state page.
 - The `↗` next to the title opens the original article in the system browser; a failure is shown below the title.
-- The top shows the translation status (ready / translating / partially missing / no translation yet) and the total paragraph count; when there are multiple pages it also shows the current page / total pages and three view buttons: `Original | Compare | Translation`.
+- The top shows the translation status (ready / translating / partially missing / no translation yet) and the total paragraph count, with three view buttons on the right: `Original | Compare | Translation`; there are no page numbers and no "Previous / Next" buttons.
 - The compare view aligns original and translation block by block side by side; blocks without a translation fall back to the original text, and the status reports the number of missing paragraphs.
 - The body renders block-level HTML (headings, quotes, lists, tables, links, code blocks, images); text is selectable.
-- Long chapters default to 20 paragraphs per page; use "Previous / Next" or `n` / `p` to move between paragraph pages; `PgUp` / `PgDn` first scroll by viewport, then switch paragraph pages at the edge.
+- The whole article is rendered at once and scrolls continuously: hold `PgDn` or `↓` to read all the way to the end, which is marked with "— End of article —"; `PgUp` / `↑` scroll back up without jumping at page boundaries or resetting the position.
 - Without a translation it automatically requests one from the server and polls; once available it is written back to the local cache and later opens no longer request it. When today's quota is exhausted or the author has disabled translation, a notice appears below the title and the original text keeps showing.
-- Switching views keeps the current reading position; paging moves by paragraph page; load failures show error details and a "Retry" button, and the `r` shortcut does the same.
+- Switching views keeps the current reading position; load failures show error details and a "Retry" button, and the `r` shortcut does the same.
 
 ### Recommendations
 
@@ -196,13 +196,13 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 ### Keyboard shortcuts and mouse
 
 - Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog.
-- Reading: `o` original, `c` compare, `t` translation, `n` / `p` next / previous paragraph page, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` page by viewport, `r` retry.
+- Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry.
 - Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable.
 
 ### Demo mode
 
 - `--demo` or `TELA_DEMO=1` uses the in-process mock, requiring no account or network.
-- An empty DB is seeded with 2 subscriptions and 4 articles (normal / long chapter / no translation / already read), covering the three views, long-article paging, fallback without translation and the read state; `TELA_DEV_SEED=0` disables seeding.
+- An empty DB is seeded with 2 subscriptions and 4 articles (normal / long chapter / no translation / already read), covering the three views, long-article continuous scrolling, fallback without translation and the read state; `TELA_DEV_SEED=0` disables seeding.
 - The demo data also includes 1 recommendation so you can inspect the "My Recommendations" list directly; demo mode has no account, so recommending/withdrawing shows that sign-in is required (write operations never hit the DB).
 
 ### Current limitations
@@ -286,8 +286,8 @@ Releases are automated by [`release.yml`](./.github/workflows/release.yml):
 ```bash
 # after removing the v prefix, the tag must equal tela-app's version in Cargo.toml
 # the TELA_CLIENT_ID repository variable must be configured before building (release packages embed it)
-git tag -a v0.4.1 -m "Tela Desktop v0.4.1"
-git push origin v0.4.1
+git tag -a v0.4.2 -m "Tela Desktop v0.4.2"
+git push origin v0.4.2
 ```
 
 After pushing the tag:
@@ -304,8 +304,8 @@ After pushing the tag:
 Pre-releases use a hyphenated tag and are automatically marked as prerelease:
 
 ```bash
-git tag -a v0.4.1-rc.1 -m "Tela Desktop v0.4.1-rc.1"
-git push origin v0.4.1-rc.1
+git tag -a v0.4.2-rc.1 -m "Tela Desktop v0.4.2-rc.1"
+git push origin v0.4.2-rc.1
 ```
 
 The Linux GUI depends on Wayland/Vulkan/font system libraries; the Windows package is a native
