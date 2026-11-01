@@ -18,8 +18,8 @@ use tela_content::mock::{MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MockContentApi
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
 use tela_ui::shell::{
-    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService,
-    RecommendationItem, RecommendationService, ShellData, ShellSection,
+    ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheProgress, OfflineCacheReport,
+    OfflineCacheService, RecommendationItem, RecommendationService, ShellData, ShellSection,
 };
 
 #[derive(Default)]
@@ -30,6 +30,8 @@ struct FakeData {
     content_key: Option<String>,
     /// 与 `FakeRecommender` 共享的推荐列表，模拟本地库的实时变化。
     recommendations: Option<Arc<Mutex<Vec<RecommendationItem>>>>,
+    /// 与 `FakeBookmarks` 共享的收藏列表，模拟本地库的实时变化。
+    bookmarks: Option<Arc<Mutex<Vec<BookmarkItem>>>>,
 }
 
 impl ShellData for FakeData {
@@ -56,6 +58,19 @@ impl ShellData for FakeData {
             .as_ref()
             .map(|items| items.lock().map(|items| items.clone()).unwrap_or_default())
             .unwrap_or_default())
+    }
+
+    fn bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        Ok(self
+            .bookmarks
+            .as_ref()
+            .map(|items| items.lock().map(|items| items.clone()).unwrap_or_default())
+            .unwrap_or_default())
+    }
+
+    fn bookmark_request(&self, _bookmark_id: i64) -> Result<ChapterRequest, TelaError> {
+        // 收藏正文统一用 mock 正文：这里只验证「收藏 → 阅读面板」这条链路。
+        Ok(ChapterRequest::new(MOCK_CONTENT_KEY, "zh-Hans"))
     }
 }
 
@@ -544,6 +559,7 @@ fn recommendations_pane_lists_opens_and_cancels(cx: &mut TestAppContext) {
         )]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
         recommendations: Some(Arc::clone(&items)),
+        bookmarks: None,
     });
     let data_for_view: Arc<dyn ShellData> = data;
     let recommender: Arc<dyn RecommendationService> = Arc::new(FakeRecommender {
@@ -622,6 +638,7 @@ fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) 
         articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
         recommendations: Some(Arc::clone(&items)),
+        bookmarks: None,
     });
     let data_for_view: Arc<dyn ShellData> = data;
     let recommender: Arc<dyn RecommendationService> = Arc::new(FakeRecommender {
@@ -650,7 +667,7 @@ fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) 
         });
         // 弹窗是模态的：t 不切视图、j 不换文章。
         assert!(!reader.update(cx, |reader, cx| reader.handle_key("t", cx)));
-        assert!(!view.update(cx, |view, cx| view.handle_shortcut("j", false, cx)));
+        assert!(!view.update(cx, |view, cx| view.handle_shortcut("j", false, window, cx)));
         window.draw(cx).clear(cx);
     })
     .unwrap();
@@ -681,4 +698,244 @@ fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) 
         window.draw(cx).clear(cx);
     })
     .unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// 我的收藏（Shift+B）
+// ---------------------------------------------------------------------------
+
+/// 收藏服务的测试替身：记录调用并同步修改共享的收藏列表。
+struct FakeBookmarks {
+    items: Arc<Mutex<Vec<BookmarkItem>>>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl BookmarkService for FakeBookmarks {
+    fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError> {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.push(url.to_string());
+        }
+        let mut items = self.items.lock().unwrap();
+        let item = BookmarkItem {
+            id: 100 + items.len() as i64,
+            url: url.to_string(),
+            title: "收藏的网页".to_string(),
+            site: "example.com".to_string(),
+            image_count: 3,
+            created_at: 1_761_350_400_000,
+        };
+        items.push(item.clone());
+        Ok(item)
+    }
+
+    fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError> {
+        if let Ok(mut items) = self.items.lock() {
+            items.retain(|item| item.id != bookmark_id);
+        }
+        Ok(())
+    }
+}
+
+fn bookmark(id: i64, title: &str, created_at: i64) -> BookmarkItem {
+    BookmarkItem {
+        id,
+        url: format!("https://example.com/bookmarks/{id}"),
+        title: title.to_string(),
+        site: "example.com".to_string(),
+        image_count: 2,
+        created_at,
+    }
+}
+
+/// Shift+B 打开收藏弹窗 → 输入网址 → 提交 → 列表刷新、阅读面板打开收藏正文。
+#[gpui::test]
+fn shift_b_opens_dialog_and_saves_a_bookmark(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 1, 1)],
+        articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        bookmarks: Some(Arc::clone(&items)),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_bookmarks(
+                data_for_view,
+                content(),
+                None,
+                None,
+                None,
+                Some(service),
+                cx,
+            )
+        })
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert!(!view.read(cx).bookmark_dialog_open());
+    })
+    .unwrap();
+
+    // Shift+B：弹窗出现，输入框拿到焦点。
+    cx.simulate_keystrokes(window, "shift-b");
+    assert!(
+        cx.update(|cx| view.read(cx).bookmark_dialog_open()),
+        "Shift+B 应打开收藏弹窗"
+    );
+
+    cx.simulate_input(window, "https://example.com/saved");
+    let dialog = cx
+        .update(|cx| view.read(cx).bookmark_dialog())
+        .expect("弹窗实体存在");
+    assert_eq!(
+        cx.update(|cx| dialog.read(cx).url_text(cx)),
+        "https://example.com/saved",
+        "输入的网址应进入输入框"
+    );
+
+    dialog.update(cx, |dialog, cx| dialog.submit(cx));
+    // 后台下载任务 + 前台回报：轮询到弹窗关闭为止（替身是即时的）。
+    let mut saved = false;
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if !cx.update(|cx| view.read(cx).bookmark_dialog_open()) {
+            saved = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(saved, "收藏成功后弹窗应关闭");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &["https://example.com/saved"]
+    );
+    assert_eq!(items.lock().unwrap().len(), 1);
+
+    let model = cx.update(|cx| view.read(cx).model().clone());
+    assert_eq!(model.bookmarks.len(), 1, "收藏列表应立刻刷新");
+    assert!(
+        view.read_with(cx, |view, _| view.bookmark_notice().map(str::to_string))
+            .as_deref()
+            .is_some_and(|notice| notice.contains("收藏的网页")),
+        "应给出收藏成功的提示"
+    );
+
+    // 切到「我的收藏」并选中：阅读面板读的是收藏正文（bookmark_id 非空）。
+    cx.update_window(window, |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.show_bookmarks(cx));
+            assert!(view.select_bookmark(100, cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let reader = cx.update(|cx| view.read(cx).reader());
+    assert_eq!(
+        cx.update(|cx| reader.read(cx).bookmark_id()),
+        Some(100),
+        "阅读面板应切到收藏正文"
+    );
+    // 收藏正文必须真的进入阅读态（不能停在“选择一篇文章开始阅读”的空态）。
+    let mut loaded = 0;
+    for _ in 0..50 {
+        cx.run_until_parked();
+        loaded = cx.update(|cx| reader.read(cx).session().total_paragraphs());
+        if loaded > 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(loaded > 0, "收藏的正文应被阅读面板加载出来");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().section),
+        ShellSection::Bookmarks
+    );
+
+    // 弹窗关闭后 j/k 恢复工作。
+    cx.simulate_keystrokes(window, "j");
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_bookmark),
+        Some(100),
+        "收藏栏里 j 只在收藏项之间移动"
+    );
+}
+
+/// 「我的收藏」列表：侧栏入口、删除按钮（直接调用动作）与阅读面板回退。
+#[gpui::test]
+fn bookmarks_pane_lists_and_removes(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(vec![
+        bookmark(7, "收藏七", 2_000),
+        bookmark(8, "收藏八", 1_000),
+    ]));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 0, 0)],
+        articles: HashMap::from([(1, Vec::new())]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        bookmarks: Some(Arc::clone(&items)),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_bookmarks(
+                data_for_view,
+                content(),
+                None,
+                None,
+                None,
+                Some(service),
+                cx,
+            )
+        })
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        assert_eq!(view.read(cx).model().bookmarks.len(), 2);
+        assert_eq!(view.read(cx).model().status_line(), "A · 0 篇 · 0 未读");
+
+        view.update(cx, |view, cx| {
+            assert!(view.show_bookmarks(cx));
+            assert!(view.select_bookmark(7, cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+        assert_eq!(view.read(cx).model().section, ShellSection::Bookmarks);
+        assert_eq!(view.read(cx).reader().read(cx).bookmark_id(), Some(7));
+
+        // 删除正在读的收藏：列表少一条，阅读面板回到空态。
+        view.update(cx, |view, cx| view.remove_bookmark(7, cx));
+        window.draw(cx).clear(cx);
+        assert_eq!(view.read(cx).model().bookmarks.len(), 1);
+        assert_eq!(view.read(cx).reader().read(cx).bookmark_id(), None);
+        assert_eq!(
+            view.read(cx)
+                .bookmark_notice()
+                .map(str::to_string)
+                .as_deref(),
+            Some("已从收藏中移除。")
+        );
+    })
+    .unwrap();
+    assert!(items.lock().unwrap().iter().all(|item| item.id != 7));
 }

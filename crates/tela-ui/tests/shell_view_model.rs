@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use tela_content::api::ChapterRequest;
 use tela_proto::TelaError;
 use tela_ui::shell::{
-    ArticleItem, FeedItem, RecommendationItem, ShellData, ShellSection, ShellViewModel,
+    ArticleItem, BookmarkItem, FeedItem, RecommendationItem, ShellData, ShellSection,
+    ShellViewModel,
 };
 
 #[derive(Default)]
@@ -16,6 +17,7 @@ struct FakeData {
     feeds: Option<Result<Vec<FeedItem>, String>>,
     articles: HashMap<i64, Result<Vec<ArticleItem>, String>>,
     recommendations: Option<Result<Vec<RecommendationItem>, String>>,
+    bookmarks: Option<Result<Vec<BookmarkItem>, String>>,
 }
 
 impl FakeData {
@@ -27,11 +29,17 @@ impl FakeData {
                 .map(|(id, rows)| (id, Ok(rows)))
                 .collect(),
             recommendations: None,
+            bookmarks: None,
         }
     }
 
     fn with_recommendations(mut self, recommendations: Vec<RecommendationItem>) -> Self {
         self.recommendations = Some(Ok(recommendations));
+        self
+    }
+
+    fn with_bookmarks(mut self, bookmarks: Vec<BookmarkItem>) -> Self {
+        self.bookmarks = Some(Ok(bookmarks));
         self
     }
 }
@@ -72,6 +80,14 @@ impl ShellData for FakeData {
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError> {
         Ok(ChapterRequest::new(article_id.to_string(), "zh-Hans"))
     }
+
+    fn bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        match &self.bookmarks {
+            Some(Ok(bookmarks)) => Ok(bookmarks.clone()),
+            Some(Err(error)) => Err(err(error)),
+            None => Ok(Vec::new()),
+        }
+    }
 }
 
 fn feed(id: i64, title: &str, unread: usize, article_count: usize) -> FeedItem {
@@ -94,6 +110,17 @@ fn article(id: i64, feed_id: i64, title: &str, unread: bool) -> ArticleItem {
         unread,
         published_at: Some(1_761_350_400 + id),
         excerpt: None,
+    }
+}
+
+fn bookmark(id: i64, title: &str, created_at: i64) -> BookmarkItem {
+    BookmarkItem {
+        id,
+        url: format!("https://example.com/bookmarks/{id}"),
+        title: title.to_string(),
+        site: "example.com".to_string(),
+        image_count: 2,
+        created_at,
     }
 }
 
@@ -372,4 +399,138 @@ fn recommendation_error_does_not_clear_feeds_or_articles() {
     assert!(model.recommendations.is_empty());
     assert!(model.recommendations_error.is_some());
     assert!(model.feeds_error.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// 我的收藏（Shift+B）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bookmarks_section_lists_items_and_keeps_selection_on_reload() {
+    let data = FakeData::with(
+        vec![feed(1, "A", 1, 1)],
+        vec![(1, vec![article(10, 1, "A1", true)])],
+    )
+    .with_bookmarks(vec![
+        bookmark(7, "收藏七", 3_000),
+        bookmark(8, "收藏八", 2_000),
+    ]);
+    let mut model = ShellViewModel::new();
+
+    assert!(model.reload(&data));
+    assert_eq!(model.bookmarks.len(), 2);
+    assert_eq!(model.status_line(), "A · 1 篇 · 1 未读");
+
+    assert!(model.show_bookmarks(&data));
+    assert_eq!(model.section, ShellSection::Bookmarks);
+    assert_eq!(model.status_line(), "我的收藏 · 2 篇");
+    assert!(!model.show_bookmarks(&data), "已经在收藏栏时不重复重绘");
+
+    // 选中一条后刷新，选中项仍在就保留；消失才回退。
+    assert!(model.select_bookmark(8));
+    assert_eq!(model.selected_bookmark, Some(8));
+    assert_eq!(model.selected_bookmark_item().map(|item| item.id), Some(8));
+    assert!(!model.reload(&data), "数据没变时 reload 不应报告变化");
+    assert_eq!(model.selected_bookmark, Some(8));
+
+    let shrunk = FakeData::with(
+        vec![feed(1, "A", 1, 1)],
+        vec![(1, vec![article(10, 1, "A1", true)])],
+    )
+    .with_bookmarks(vec![bookmark(7, "只剩七", 3_000)]);
+    model.reload(&shrunk);
+    assert_eq!(model.selected_bookmark, None, "收藏被移除后选中项应清空");
+    assert!(model.selected_bookmark_item().is_none());
+}
+
+#[test]
+fn bookmark_navigation_stops_at_the_ends() {
+    let data = FakeData::with(
+        vec![feed(1, "A", 1, 1)],
+        vec![(1, vec![article(10, 1, "A1", true)])],
+    )
+    .with_bookmarks(vec![
+        bookmark(7, "一", 3_000),
+        bookmark(8, "二", 2_000),
+        bookmark(9, "三", 1_000),
+    ]);
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+    model.show_bookmarks(&data);
+
+    // j：从“未选中”开始打开第一条；到末尾停住。
+    assert!(model.next_article());
+    assert_eq!(model.selected_bookmark, Some(7));
+    assert!(model.next_article());
+    assert_eq!(model.selected_bookmark, Some(8));
+    assert!(model.next_article());
+    assert_eq!(model.selected_bookmark, Some(9));
+    assert!(!model.next_article(), "末尾不应回绕");
+    assert_eq!(model.selected_bookmark, Some(9));
+
+    assert!(model.prev_article());
+    assert_eq!(model.selected_bookmark, Some(8));
+    assert!(model.prev_article());
+    assert_eq!(model.selected_bookmark, Some(7));
+    assert!(!model.prev_article(), "开头不应回绕");
+}
+
+#[test]
+fn missing_bookmark_id_is_ignored() {
+    let data = FakeData::default().with_bookmarks(vec![bookmark(7, "一", 3_000)]);
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+    let before = model.clone();
+
+    assert!(!model.select_bookmark(999));
+    assert_eq!(model, before, "不存在的 id 不应改变任何状态");
+
+    // 空收藏时导航也是 no-op，不能把 section 弄乱。
+    let empty = FakeData::default();
+    let mut empty_model = ShellViewModel::new();
+    empty_model.show_bookmarks(&empty);
+    assert!(!empty_model.next_article());
+    assert_eq!(empty_model.section, ShellSection::Bookmarks);
+}
+
+#[test]
+fn bookmark_errors_do_not_clobber_feeds_or_recommendations() {
+    let data = FakeData {
+        feeds: Some(Ok(vec![feed(1, "A", 2, 2)])),
+        articles: HashMap::from([(1, Ok(vec![article(10, 1, "A1", true)]))]),
+        recommendations: Some(Ok(vec![recommendation(10, "A1", 2_000)])),
+        bookmarks: Some(Err("收藏表打不开".to_string())),
+    };
+    let mut model = ShellViewModel::new();
+    model.reload(&data);
+
+    assert!(
+        model
+            .bookmarks_error
+            .as_deref()
+            .is_some_and(|error| error.contains("收藏表打不开")),
+        "{:?}",
+        model.bookmarks_error
+    );
+    assert!(model.bookmarks.is_empty());
+    assert_eq!(model.feeds.len(), 1, "收藏失败不应清掉订阅");
+    assert_eq!(model.articles.len(), 1, "收藏失败不应清掉文章");
+    assert_eq!(model.recommendations.len(), 1, "收藏失败不应清掉推荐");
+
+    model.show_bookmarks(&data);
+    assert_eq!(model.section, ShellSection::Bookmarks);
+    assert_eq!(model.status_line(), "我的收藏 · 0 篇");
+}
+
+#[test]
+fn bookmark_meta_label_falls_back_to_url_host_and_shows_images() {
+    let mut item = bookmark(7, "标题", 1_761_350_400);
+    assert_eq!(item.created_label(), "2025-10-25");
+    assert_eq!(item.meta_label(), "example.com · 2025-10-25 · 2 张图");
+
+    item.site = String::new();
+    item.url = "https://blog.example.org:8443/post".to_string();
+    item.image_count = 0;
+    assert_eq!(item.site_label(), "blog.example.org");
+    assert_eq!(item.meta_label(), "blog.example.org · 2025-10-25");
 }

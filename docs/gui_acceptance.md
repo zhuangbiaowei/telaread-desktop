@@ -1,11 +1,15 @@
-# GUI 宿主验收：S0–S4（M2/M3 的 GUI 补课）
+# GUI 宿主验收：S0–S8（M2/M3 的 GUI 补课 + 推荐/网页收藏）
 
+> **2026-11-02 更新（v0.4.3）**：新增 S8「网页收藏」——`Shift+B` 收藏任意网址，
+> 正文以 Markdown 存本地（`documents`，schema v6），图片本地缓存，微信/X 站点适配、
+> 验证页识别与 Markdown 浏览均已实测。验收命令与数量见下文 S8 段。
+>
 > **2026-10-28 更新（R1）**：应用装配层已切到真实 API v1（见 [`real-api.md`](./real-api.md)）。
 > 2026-10-30 起 GUI **默认真实登录模式**（发布包内置 public client id，`--demo` 或
 > `TELA_DEMO=1` 才进 demo）。装配层测试文件由 `tests/services.rs` 改名为
 > `tests/services_v2.rs`，断言口径不变（2 订阅 / 4 文章 / 3 未读）。
 
-- 验收日期：**2026-10-27**（CST）
+- 验收日期：**2026-10-27**（CST）；S8 于 **2026-11-02** 复验（v0.4.3）
 - 计划依据：[`development_plan.md`](./development_plan.md) §9 M2/M3
 - 目标：把 M2 的“三栏视图 + 应用装配”和 M3 的“阅读视图 + 翻译对照”真正接到
   GPUI 宿主上，同时保证默认无 GUI 构建/测试不回归
@@ -20,10 +24,10 @@
 | S2 三栏 shell + 订阅列表 + 空态 | ✅ | `shell_view_model` 5 + `gui_shell` 2 passed；截图 |
 | S3 文章列表 + 阅读面板 + 交互 | ✅ | `gui_reader` 4 passed；三视图/翻页/失败重试；截图 |
 | S4 CI/验收/文档 | ✅（CI 配置已加，未在 GitHub runner 实跑） | `.github/workflows/ci.yml` 的 `gui` job；本文档 |
-| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 116 passed / 0 failed |
-| GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 43 passed / 0 failed / 1 ignored |
+| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 178 passed / 0 failed / 7 ignored |
+| GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 59 passed / 0 failed / 2 ignored |
 
-**总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用；S7 已接上推荐与「我的推荐」。M4 其余功能尚未开始。**
+**总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用；S7 已接上推荐与「我的推荐」；S8 已接上 `Shift+B` 网页收藏与「我的收藏」。M4 其余功能尚未开始。**
 
 ## 1. 切片与交付
 
@@ -37,6 +41,7 @@
 | S5 | 账号面板：登录 / 等待授权（打开/复制/取消）/ 退出；登录后自动同步刷新 | `tela-ui/src/account.rs`、`gui/shell.rs`、`tela-app/src/services.rs` | `gui_account` 3 passed |
 | S6 | 列表发表时间、标题旁打开原文、↑/↓ 逐行滚动、TelaRead 主页入口 | `tela-ui/src/{shell.rs,gui/*}`、`tela-net/src/browser.rs` | `shell_view_model`、`gui_reader`、`gui_shell` |
 | S7 | 推荐弹窗（推荐语/编辑/撤回）、侧栏「我的推荐」与推荐列表 | `tela-ui/src/{shell.rs,gui/*}`、`tela-app/src/services.rs` | `shell_view_model`、`gui_shell`、`services_v2`、`tela-app --lib` |
+| S8 | `Shift+B` 收藏网页弹窗、侧栏「我的收藏」、网页正文/标题/图片落库与阅读 | `tela-content/src/webpage.rs`、`tela-store/src/{schema,store}.rs`、`tela-ui/src/{shell.rs,gui/{shell,bookmark,reader}.rs}`、`tela-app/src/{services,content_cache}.rs` | `webpage`、`store_v2`、`shell_view_model`、`gui_shell`、`services_v2`、截图 |
 
 ### S1 关键行为
 
@@ -79,6 +84,58 @@
   （推荐列表 + 弹窗 + 取消推荐 + 模态快捷键）、`services_v2` 12 passed、
   `tela-app --lib` 4 passed（本地乐观写入/队列/scope 拒绝）。
 
+### S8 网页收藏与「我的收藏」（2026-11-01）
+
+- 任意界面按 `Shift+B` 打开窗口级模态「收藏网页」弹窗：单行网址输入框（剪贴板里是网址时
+  自动预填）、`Esc` 取消、`Enter`/按钮提交；下载期间禁止重复提交并显示「正在下载…」。
+- 下载在 `background_executor` 里执行，不阻塞渲染线程：`tela-content::webpage` 用
+  `reqwest`（rustls）抓 HTML；正文抽取先走 `dom_smoothie`（Readability.js 的 Rust 移植），
+  再用 `html5ever` + `markup5ever_rcdom` 清洗成块，最后用 `htmd`（turndown.js 的移植）
+  转成 **Markdown**；阅读时 `tela-content::markdown` 用 `pulldown-cmark` 把 Markdown
+  渲染回块 HTML。
+  - 标题：Readability 的 title → `og:title` → `<title>` → 正文首个 `h1` → 主机名；
+    站点：Readability 的 site_name → `og:site_name` → 主机名；语言同理。
+  - 正文容器：`article` / `main` / `[role=main]` / 常见正文 class（取文字最多者，≥200 字），
+    否则回退 `<body>`；`script/style/nav/footer/aside/form/...` 整棵丢弃。
+  - 块：标题、段落、引用、`pre` 代码（`<pre><code>` 才会输出围栏代码块）、
+    `ul`/`ol`（整张列表一个块）、`table`（整表一个块，输出 Markdown 表格）、
+    `figure`/`img`（绝对地址）、`dl`。
+  - 行内只保留白名单标签（`a/strong/em/code/br/sub/sup/mark/...`），链接与图片改写为绝对
+    `http(s)` 地址；`javascript:`、`data:`、事件属性一律丢弃。
+  - 站点适配：`mp.weixin.qq.com` 用微信内浏览器 UA（桌面 UA 会 302 到
+    `wappoc_appmsgcaptcha` 验证页），正文容器认 `#js_content` / `.rich_media_content`；
+    语义明确的容器（`article`/`main`/`#js_content`）不要求“文字够多”兜底。图片同时识别
+    `data-src` / `data-original` / `data-lazy-src` 等懒加载属性。
+  - 验证页识别：正文很薄（&lt; 600 字）且命中验证页特征（「环境异常」「完成验证后即可继续访问」
+    「Just a moment...」等，或重定向到 `wappoc_appmsgcaptcha` 等地址）时返回
+    `TelaError::Blocked`，界面显示「要求人工验证」而不是把验证页存成文章。
+  - 读取容错：部分站点（含微信）发完正文就断开 TLS，`read_to_end` 会报 unexpected eof；
+    读取循环保留已收到的 HTML 前缀继续解析，只在零字节时失败。
+  - 不可见节点：`display:none` / `hidden` 的子树整棵跳过（图片检查祖先链）。微信（mdnice 导出）
+    在小标题两侧放了 `display:none` 的 `<span>unset</span>` 样式 hack，之前会变成正文里的
+    “unsetunset”，现在会被剔除。
+  - X（Twitter）帖子：通用抽取只能拿到导航/登录按钮和“作者 on X”标题。`fetch` 识别
+    `/<user>/status/<id>` 后改走 `x_post_from_html`：从脚本里的 GraphQL 结果
+    `tweet_result_by_rest_id` 解析长推文全文（`note_tweet`）、作者与引用帖；标题取正文第一行
+    （≤80 字），正文按空行分段，引用帖作为引用块，页面 UI 文字不进入正文。
+- 落库：正文 **Markdown** 写 `documents`（key = `web-` + URL 的 64 位 FNV-1a，
+  连同页面语言），图片写 `cached_images`，收藏行写 `bookmarks`（schema v6）。
+  图片下载失败不阻断收藏，只记录成功张数；再次收藏同一 URL 复用同一条目并刷新内容
+  （保留首次收藏时间）。旧版本写入 `bodies` 的块正文仍可回退读取。
+- 收藏**不属于** `/v1/sync`：`clear_account()`（登出/换账号）不清 `bookmarks`，也不需要登录态。
+- 阅读：`ReaderView::select_bookmark` 走与文章相同的 `ReaderSession`，但
+  `CachingContentApi` 对 `web-` 前缀的正文先读 `documents` 里的 Markdown，用
+  `pulldown-cmark` 渲染成块后返回（旧数据回退 `bodies`），不发翻译请求；阅读面板固定原文视图、
+  隐藏 `o/c/t`、状态行显示「收藏的网页 · 共 N 段」。图片仍按 Markdown 里的绝对地址从
+  `cached_images` 读取，离线可显示。
+- 侧栏在「我的推荐」下方新增「我的收藏」入口（显示条数）；中间栏列出标题、站点、日期、
+  图片数与网址，行内「移除」删除收藏并清理只被它引用的正文；删除正在阅读的收藏会让阅读面板
+  回到空态。
+- 验收：`webpage` 15 passed / 3 ignored（真实网络冒烟：普通网页、公众号文章、X 帖子）、
+  `markdown`（tela-content lib）14 passed、`store_v2` 19 passed、`shell_view_model` 14 passed、
+  `gui_shell` 9 passed（含 `Shift+B` → 输入 → 提交 → 列表/阅读）、
+  `services_v2` 17 passed / 4 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、带图页面/图片缓存）、截图 2 张。
+
 ## 2. 验收命令与实测结果
 
 运行环境：Linux x86_64（Hyprland/Wayland）、`rustc 1.98.1`、`gpui-kit 0.8.0`
@@ -87,16 +144,16 @@
 ```bash
 # 1) 默认构建/测试（不编译 gpui-kit，保护无 GUI 系统库的机器）
 cargo test --workspace --locked
-# 实测：116 passed / 0 failed
+# 实测：178 passed / 0 failed / 7 ignored（真实网络冒烟用例）
 
 # 2) GUI 测试（无头；显式去掉显示环境，证明不依赖显示器）
 env -u DISPLAY -u WAYLAND_DISPLAY \
   cargo test -p tela-ui --features gui-test --locked
-# 实测：43 passed / 0 failed / 1 ignored（ignored = 截图工具，需 WGPU headless renderer）
+# 实测：59 passed / 0 failed / 2 ignored（ignored = 截图工具，需 WGPU headless renderer）
 
 # 3) 应用装配 + GUI 数据冒烟
 cargo test -p tela-app --features gui --locked
-# 实测：21 passed / 0 failed；其中 gui_check 1 passed
+# 实测：39 passed / 0 failed / 4 ignored；其中 gui_check 1 passed
 
 # 4) 真实二进制：开窗 demo
 TELA_DB=target/tela-gui.db \
@@ -104,8 +161,8 @@ TELA_DB=target/tela-gui.db \
 
 # 5) 无窗口数据链路（CI 用）
 TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
-  cargo run -p tela-app --features gui --bin tela-gui --locked -- --check
-# 实测：tela-gui check: feeds=2 articles=4 unread=3
+  cargo run -p tela-app --features gui --bin tela-gui --locked -- --demo --check
+# 实测：tela-gui check: mode=demo feeds=2 articles=4 unread=3 recommendations=1 bookmarks=0
 
 # 6) 代码质量
 cargo fmt --all --check
@@ -125,6 +182,8 @@ cargo test -p tela-ui --features gui-test --test gui_screenshot -- --ignored --n
 | S0 启动窗口 | ![S0](images/gui-s0-boot.png) |
 | S2 三栏外壳（真实窗口，被 Hyprland 平铺成窄窗） | ![S2](images/gui-s2-shell.png) |
 | S3 三栏 + 对照阅读（1100×720 headless 渲染） | ![S3](images/gui-s3-reader.png) |
+| S8 「我的收藏」+ 收藏的网页阅读 | ![S8 bookmarks](images/gui-s8-bookmarks.png) |
+| S8 `Shift+B` 收藏网页弹窗 | ![S8 dialog](images/gui-s8-bookmark-dialog.png) |
 
 S3 截图由 `gui_screenshot` 用 GPUI `HeadlessAppContext` + WGPU 渲染，和真实窗口共用
 同一套 `ShellView`/`ReaderView` 代码，不依赖显示器。

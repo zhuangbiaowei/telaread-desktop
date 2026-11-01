@@ -11,10 +11,12 @@ use tela_content::api::ContentApi;
 use tela_proto::TelaError;
 
 use crate::account::{AccountMode, AccountService, AccountStatus, LoginPhase, LoginTicket};
+use crate::gui::bookmark::{BookmarkDialogEvent, BookmarkDialogView};
 use crate::gui::reader::{ReaderEvent, ReaderView};
 use crate::shell::{
-    ArticleItem, FeedItem, OfflineCacheProgress, OfflineCacheReport, OfflineCacheService,
-    RecommendationItem, RecommendationService, ShellData, ShellSection, ShellViewModel,
+    ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheProgress, OfflineCacheReport,
+    OfflineCacheService, RecommendationItem, RecommendationService, ShellData, ShellSection,
+    ShellViewModel,
 };
 
 use gpui_kit::base::{h_flex, v_flex};
@@ -64,6 +66,14 @@ pub struct ShellView {
     recommendations: Option<Arc<dyn RecommendationService>>,
     /// 推荐列表上的一句提示（完成/失败）。
     recommend_notice: Option<String>,
+    /// 网页收藏写能力；测试/只读装配可以为空（收藏弹窗会给出提示）。
+    bookmarks: Option<Arc<dyn BookmarkService>>,
+    /// 收藏网页弹窗；`None` 表示关闭。弹窗自己负责下载与错误提示。
+    bookmark_dialog: Option<Entity<BookmarkDialogView>>,
+    /// 收藏成功/失败的一句提示（侧栏顶部与收藏列表）。
+    bookmark_notice: Option<String>,
+    /// 收藏弹窗的事件订阅；必须保活。
+    bookmark_subscription: Option<Subscription>,
     /// 阅读面板的推荐事件订阅；必须保活。
     _reader_subscription: Subscription,
 }
@@ -108,6 +118,27 @@ impl ShellView {
         recommendations: Option<Arc<dyn RecommendationService>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_bookmarks(
+            data,
+            content,
+            accounts,
+            offline_cache,
+            recommendations,
+            None,
+            cx,
+        )
+    }
+
+    /// 完整装配：账号、离线缓存、推荐与网页收藏（`Shift+B`）。
+    pub fn new_with_bookmarks(
+        data: Arc<dyn ShellData>,
+        content: Arc<dyn ContentApi>,
+        accounts: Option<Arc<dyn AccountService>>,
+        offline_cache: Option<Arc<dyn OfflineCacheService>>,
+        recommendations: Option<Arc<dyn RecommendationService>>,
+        bookmarks: Option<Arc<dyn BookmarkService>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let reader = cx.new(|cx| {
             ReaderView::new_with_recommendations(
                 data.clone(),
@@ -150,6 +181,10 @@ impl ShellView {
             cache_tasks: Vec::new(),
             recommendations,
             recommend_notice: None,
+            bookmarks,
+            bookmark_dialog: None,
+            bookmark_notice: None,
+            bookmark_subscription: None,
             _reader_subscription,
         };
         view.sync_reader(cx);
@@ -406,6 +441,123 @@ impl ShellView {
         self.recommend_notice.as_deref()
     }
 
+    /// 最近一次收藏操作的结果提示（测试/诊断用）。
+    pub fn bookmark_notice(&self) -> Option<&str> {
+        self.bookmark_notice.as_deref()
+    }
+
+    /// 收藏弹窗是否打开（测试/诊断用）。
+    pub fn bookmark_dialog_open(&self) -> bool {
+        self.bookmark_dialog.is_some()
+    }
+
+    /// 收藏弹窗实体（测试/诊断用；关闭时为 `None`）。
+    pub fn bookmark_dialog(&self) -> Option<Entity<BookmarkDialogView>> {
+        self.bookmark_dialog.clone()
+    }
+
+    /// 打开收藏网页弹窗（`Shift+B`）。
+    ///
+    /// 推荐弹窗已经打开时不抢焦点：两个模态同时出现会让 Esc/Enter 的归属变得
+    /// 不可预测。没有收藏能力（只读装配）时也给一句明确的提示。
+    pub fn open_bookmark_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.bookmark_dialog.is_some() {
+            return;
+        }
+        if self.reader.read(cx).recommend_dialog_open() {
+            return;
+        }
+        if self.bookmarks.is_none() {
+            self.bookmark_notice = Some("当前装配不支持收藏网页".to_string());
+            cx.notify();
+            return;
+        }
+
+        let service = self.bookmarks.clone();
+        let dialog = cx.new(|cx| BookmarkDialogView::new(service, window, cx));
+        let subscription = cx.subscribe(
+            &dialog,
+            |this, _dialog, event: &BookmarkDialogEvent, cx| match event {
+                BookmarkDialogEvent::Saved(item) => this.bookmark_saved(item, cx),
+                BookmarkDialogEvent::Cancelled => {
+                    this.bookmark_dialog = None;
+                    cx.notify();
+                }
+            },
+        );
+        self.bookmark_dialog = Some(dialog);
+        self.bookmark_subscription = Some(subscription);
+        self.bookmark_notice = None;
+        cx.notify();
+    }
+
+    /// 关闭收藏弹窗（保存成功或用户取消）。
+    pub fn close_bookmark_dialog(&mut self, cx: &mut Context<Self>) {
+        self.bookmark_dialog = None;
+        self.bookmark_subscription = None;
+        cx.notify();
+    }
+
+    /// 收藏成功：关闭弹窗、刷新「我的收藏」，正在看收藏列表时顺带打开新收藏。
+    fn bookmark_saved(&mut self, item: &BookmarkItem, cx: &mut Context<Self>) {
+        self.bookmark_dialog = None;
+        self.bookmark_subscription = None;
+        self.model.reload(self.data.as_ref());
+        self.bookmark_notice = Some(format!("已收藏「{}」到「我的收藏」", item.title));
+        if self.model.section == ShellSection::Bookmarks {
+            self.model.select_bookmark(item.id);
+            self.sync_reader(cx);
+        }
+        cx.notify();
+    }
+
+    /// 打开“我的收藏”栏；返回是否发生变化。
+    pub fn show_bookmarks(&mut self, cx: &mut Context<Self>) -> bool {
+        let changed = self.model.show_bookmarks(self.data.as_ref());
+        if changed {
+            self.bookmark_notice = None;
+            self.sync_reader(cx);
+            cx.notify();
+        }
+        changed
+    }
+
+    /// 选中一条收藏并交给阅读面板；返回是否发生变化。
+    pub fn select_bookmark(&mut self, bookmark_id: i64, cx: &mut Context<Self>) -> bool {
+        let changed = self.model.select_bookmark(bookmark_id);
+        if changed {
+            self.sync_reader(cx);
+        }
+        changed
+    }
+
+    /// 从「我的收藏」里删除一条；本地立即生效（收藏不参与同步）。
+    pub fn remove_bookmark(&mut self, bookmark_id: i64, cx: &mut Context<Self>) {
+        let Some(service) = self.bookmarks.clone() else {
+            self.bookmark_notice = Some("当前装配不支持收藏网页".to_string());
+            cx.notify();
+            return;
+        };
+        match service.remove_bookmark(bookmark_id) {
+            Ok(()) => {
+                let was_selected = self.model.selected_bookmark == Some(bookmark_id);
+                self.model.reload(self.data.as_ref());
+                self.bookmark_notice = Some("已从收藏中移除。".to_string());
+                if was_selected {
+                    // 删掉的正是正在读的这篇：阅读面板退回空态，避免继续显示已删正文。
+                    self.reader.update(cx, |reader, cx| {
+                        reader.clear_selection(cx);
+                    });
+                    self.sync_reader(cx);
+                }
+            }
+            Err(error) => {
+                self.bookmark_notice = Some(format!("移除收藏失败：{error}"));
+            }
+        }
+        cx.notify();
+    }
+
     /// 选中文章；返回是否发生变化。
     pub fn select_article(&mut self, article_id: i64, cx: &mut Context<Self>) -> bool {
         let changed = self.model.select_article(article_id);
@@ -465,13 +617,19 @@ impl ShellView {
         true
     }
 
-    /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客。
+    /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客，`Shift+b` 收藏网页。
     ///
     /// 阅读面板自己处理 `o/c/t/PageUp/PageDown/↑/↓`；这里只接管需要改
-    /// 选中项的键，事件从阅读面板冒泡上来后调用。
-    pub fn handle_shortcut(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) -> bool {
-        // 推荐弹窗是模态的：输入推荐语时外壳不应抢 j/k。
-        if self.reader.read(cx).recommend_dialog_open() {
+    /// 选中项或开弹窗的键，事件从阅读面板冒泡上来后调用。
+    pub fn handle_shortcut(
+        &mut self,
+        key: &str,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // 弹窗是模态的：输入网址/推荐语时外壳不应抢 j/k。
+        if self.bookmark_dialog.is_some() || self.reader.read(cx).recommend_dialog_open() {
             return false;
         }
         match (key.to_ascii_lowercase().as_str(), shift) {
@@ -479,6 +637,10 @@ impl ShellView {
             ("k", false) => self.prev_article(cx),
             ("j", true) => self.next_feed(cx),
             ("k", true) => self.prev_feed(cx),
+            ("b", true) => {
+                self.open_bookmark_dialog(window, cx);
+                true
+            }
             _ => false,
         }
     }
@@ -507,7 +669,18 @@ impl ShellView {
                 .model
                 .selected_recommendation_item()
                 .map(|item| (item.article_id, item.title.clone(), item.url.clone())),
+            ShellSection::Bookmarks => None,
         };
+        if self.model.section == ShellSection::Bookmarks {
+            if let Some(item) = self.model.selected_bookmark_item() {
+                let (bookmark_id, title, url) =
+                    (item.id, item.title.clone(), Some(item.url.clone()));
+                self.reader.update(cx, |reader, cx| {
+                    reader.select_bookmark(bookmark_id, title, url, cx)
+                });
+            }
+            return;
+        }
         if let Some((article_id, title, url)) = selection {
             self.reader
                 .update(cx, |reader, cx| reader.select(article_id, title, url, cx));
@@ -941,6 +1114,7 @@ impl ShellView {
                     }),
             )
             .child(self.recommendations_entry(cx))
+            .child(self.bookmarks_entry(cx))
             .child(self.feed_list(cx))
             .child(
                 v_flex()
@@ -993,6 +1167,50 @@ impl ShellView {
                         FontWeight::MEDIUM
                     })
                     .child("我的推荐"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                    .child(count.to_string()),
+            )
+    }
+
+    /// 侧栏的“我的收藏”入口：显示本地收藏数量。
+    fn bookmarks_entry(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.model.section == ShellSection::Bookmarks;
+        let count = self.model.bookmarks.len();
+        h_flex()
+            .id("sidebar-bookmarks")
+            .role(Role::Button)
+            .aria_label(format!("我的收藏，{count} 篇"))
+            .mx_2()
+            .mb_1()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .rounded_md()
+            .cursor_pointer()
+            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(!selected, |element| {
+                element.hover(|style| style.bg(rgb(PANEL)))
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.show_bookmarks(cx) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .child("我的收藏"),
             )
             .child(
                 div()
@@ -1173,6 +1391,7 @@ impl ShellView {
         let middle = match model.section {
             ShellSection::Feed => self.article_pane(cx),
             ShellSection::Recommendations => self.recommendation_pane(cx),
+            ShellSection::Bookmarks => self.bookmark_pane(cx),
         };
         h_flex()
             .flex_1()
@@ -1407,6 +1626,178 @@ impl ShellView {
             .into_any_element()
     }
 
+    /// 中间栏的“我的收藏”列表：标题、站点、收藏日期、图片数与移除按钮。
+    fn bookmark_pane(&self, cx: &mut Context<Self>) -> Div {
+        let model = &self.model;
+        let count = model.bookmarks.len();
+
+        let mut list = v_flex()
+            .id("bookmark-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .p_2()
+            .gap_1();
+
+        if let Some(error) = &model.bookmarks_error {
+            list = list.child(Self::inline_error("收藏列表加载失败", error));
+        } else if model.bookmarks.is_empty() {
+            list = list.child(
+                v_flex()
+                    .p_4()
+                    .gap_2()
+                    .items_center()
+                    .child(div().text_sm().child("还没有收藏网页"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("按 Shift+B 输入一个网址，Tela 会下载正文、标题和图片。"),
+                    ),
+            );
+        } else {
+            for item in &model.bookmarks {
+                list = list.child(self.bookmark_row(item, cx));
+            }
+        }
+
+        v_flex()
+            .w(px(360.))
+            .h_full()
+            .bg(rgb(PANEL))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                h_flex()
+                    .p_4()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("我的收藏"),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(format!("{count} 篇")),
+                            )
+                            // 除了 Shift+B，也给一个可见入口：新用户不必先记住快捷键。
+                            .child(
+                                div()
+                                    .id("bookmark-add")
+                                    .role(Role::Button)
+                                    .aria_label("收藏一个网址（Shift+B）")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(BORDER))
+                                    .text_xs()
+                                    .text_color(rgb(SUBTLE))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_bookmark_dialog(window, cx);
+                                    }))
+                                    .child("＋ 收藏"),
+                            ),
+                    ),
+            )
+            .when_some(self.bookmark_notice.clone(), |element, notice| {
+                element.child(
+                    div()
+                        .px_4()
+                        .pt_2()
+                        .text_xs()
+                        .text_color(rgb(SUBTLE))
+                        .child(notice),
+                )
+            })
+            .child(list)
+    }
+
+    fn bookmark_row(&self, item: &BookmarkItem, cx: &mut Context<Self>) -> impl IntoElement {
+        let bookmark_id = item.id;
+        let selected = self.model.section == ShellSection::Bookmarks
+            && self.model.selected_bookmark == Some(bookmark_id);
+        v_flex()
+            .id(("bookmark", bookmark_id as u64))
+            .role(Role::Button)
+            .aria_label(item.title.clone())
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .cursor_pointer()
+            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(!selected, |element| {
+                element.hover(|style| style.bg(rgb(SIDEBAR)))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.select_bookmark(bookmark_id, cx) {
+                    cx.notify();
+                }
+            }))
+            .child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(item.title.clone()),
+                    )
+                    .child(self.remove_bookmark_button(bookmark_id, cx)),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(item.meta_label()),
+            )
+            .when_some(Some(item.url.clone()), |element, url| {
+                element.child(div().text_xs().text_color(rgb(MUTED)).truncate().child(url))
+            })
+    }
+
+    /// 收藏行右侧的“移除”按钮；阻止事件冒泡，避免顺带打开这篇。
+    fn remove_bookmark_button(&self, bookmark_id: i64, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(("bookmark-remove", bookmark_id as u64))
+            .role(Role::Button)
+            .aria_label("从收藏中移除")
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_xs()
+            .text_color(rgb(DANGER))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.remove_bookmark(bookmark_id, cx);
+            }))
+            .child("移除")
+            .into_any_element()
+    }
+
     fn article_row(
         article: &ArticleItem,
         selected: Option<i64>,
@@ -1550,16 +1941,19 @@ impl Render for ShellView {
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let modifiers = event.keystroke.modifiers;
                 if modifiers.control || modifiers.alt || modifiers.platform {
                     return;
                 }
-                if this.handle_shortcut(&event.keystroke.key, modifiers.shift, cx) {
+                if this.handle_shortcut(&event.keystroke.key, modifiers.shift, window, cx) {
                     cx.notify();
                 }
             }))
             .child(sidebar)
             .child(main)
+            .when_some(self.bookmark_dialog.clone(), |element, dialog| {
+                element.child(dialog)
+            })
     }
 }

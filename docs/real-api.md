@@ -24,7 +24,8 @@ CLI 与本地库。GUI 的实时后台同步、Discover/Search、划线/文件�
 | 翻译请求/状态/对象 | `/v1/translations`、`/o/t/…` | 同上 |
 | 接收方/读取方 | `/v1/me`、`/v1/usage` | `ApiClient::me/usage` |
 | 推荐 / 撤回推荐 | `POST /v1/mutations`（`recommend` / `unrecommend`） | `AppServices::recommend/unrecommend`；阅读面板推荐弹窗与「我的推荐」栏 |
-| 本地库 v4 | — | `tela-store`（schema v4）；`tela-app::content_cache` 负责正文/译文/图片缓存与离线预取 |
+| 本地库 v6 | — | `tela-store`（schema v6）；`tela-app::content_cache` 负责正文/译文/图片缓存与离线预取 |
+| 网页收藏（`Shift+B`） | 直连任意 `http(s)` URL（不走 Tela API） | `tela-content::webpage` 抓取/抽取；`AppServices::add_bookmark` 落库；`tela-ui::gui::bookmark` 弹窗 |
 | GUI 账号面板 | — | `tela-ui::account` + `ShellView`：登录/等待授权/复制链接/退出 |
 | CLI | — | `tela-app login/sync/list/read/mark-read/mark-unread/like/status/meta/demo` |
 
@@ -156,7 +157,7 @@ cargo run -p tela-app -- login --ephemeral    # 刷新令牌只放内存（不�
 
 ## 7. 本地库
 
-schema v4：
+schema v6：
 
 | 表 | 用途 |
 |---|---|
@@ -166,10 +167,17 @@ schema v4：
 | `bodies` | `content_key` → 不可变正文 JSON（第一次打开后永久复用） |
 | `cached_translations` | `(content_key, lang)` → 译本状态 + 译本对象 JSON（含 pending/none 快照） |
 | `cached_images` | 图片 URL → 原始字节 BLOB（正文与译文里的 `<img>` 都覆盖） |
+| `bookmarks` | 本地网页收藏：URL（唯一）、标题、站点、语言、摘要、正文 key、图片数、收藏时间 |
+| `documents` | 收藏网页的 Markdown 正文：`content_key`（`web-` 前缀）→ markdown + 语言 + 更新时间 |
 
 迁移：v1（mock 协议，行带 `seq`、游标是整数）与真实 API 不兼容，打开时丢弃 `sync_rows`
-与 `meta`，保留库文件本身。v2 → v4 只补 `cached_translations` / `cached_images`，
-正文缓存与离线队列原样保留。真实数据从登录后的第一次快照开始。
+与 `meta`，保留库文件本身。v2 → v6 只补 `cached_translations` / `cached_images` /
+`bookmarks` / `documents`，正文缓存与离线队列原样保留。真实数据从登录后的第一次快照开始。
+
+网页收藏与 Tela 协议无关：`Shift+B` 抓取的正文先用 `dom_smoothie`（Readability 移植）
+抽正文，再清洗成块并用 `htmd` 转 Markdown；Markdown 以 `web-` 前缀写 `documents`，
+图片写 `cached_images`，收藏行写 `bookmarks`。阅读时用 `pulldown-cmark` 把 Markdown
+渲染回块 HTML，图片从本地缓存取；退出登录/切换账号不会清空它们，也不发翻译请求。
 
 阅读与离线：`tela-app::content_cache::CachingContentApi` 第一次打开时从远端取回正文、译文
 与图片并写入上面三张缓存表；之后打开只读本地。左侧博客名旁的「缓存」按钮按订阅批量预取
@@ -191,7 +199,7 @@ schema v4：
 | 12 | 服务端响应违约 |
 | 13 | 正文/渲染失败 |
 | 20 | 网络或 API 失败（5xx、404、`invalid_request`） |
-| 21 | 需要用户处理（未登录、`invalid_grant`、`app_suspended`、`subscription_limit`） |
+| 21 | 需要用户处理（未登录、`invalid_grant`、`app_suspended`、`subscription_limit`、网页要求人工验证 `blocked_page`） |
 | 22 | 需要等待（429、`post_limit` / `feed_limit`、`apps_paused`） |
 
 每日额度（`post_limit` / `feed_limit`）在正文层转成 `TelaError::Limit`，带 `limit` 与

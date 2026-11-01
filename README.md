@@ -4,9 +4,10 @@
 
 基于 [Tela](https://telaread.com) 的桌面阅读器（Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit)）。
 
-> **当前进度**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
+> **当前进度（v0.4.3）**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
 > 全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、订阅级一键离线缓存、
-> 推荐文章与「我的推荐」、断网自动暂停译文轮询、终端 CLI 与离线 GUI demo。
+> 推荐文章与「我的推荐」、`Shift+B` 收藏任意网页到「我的收藏」、断网自动暂停译文轮询、
+> 终端 CLI 与离线 GUI demo。
 > 协议依据是官方 [authorization.md](https://github.com/hutusi/tela/blob/main/docs/api/authorization.md)
 > 与 [v1.md](https://github.com/hutusi/tela/blob/main/docs/api/v1.md)（2026-10-28 实读）。
 > 详细落地说明见 [`docs/real-api.md`](./docs/real-api.md)。
@@ -141,9 +142,10 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 ### 窗口与布局
 
 - 默认窗口 1100×720，最小 880×560；标题为 `Tela Desktop`，关闭最后一个窗口即退出。
-- 三栏：左侧订阅列表（260 px）、中间当前订阅的文章或「我的推荐」（340–360 px）、右侧阅读面板（自适应）。
+- 三栏：左侧订阅列表（260 px）、中间当前订阅的文章、「我的推荐」或「我的收藏」（340–360 px）、
+  右侧阅读面板（自适应）。
 - 左侧顶部是品牌「TelaRead」，点击用系统浏览器打开 <https://telaread.com>；下方是当前订阅状态。
-- 订阅列表上方是「我的推荐」入口，显示已推荐的文章数；点击切换到推荐列表。
+- 订阅列表上方是「我的推荐」与「我的收藏」两个入口，各显示条目数；点击切换对应列表。
 - 每个订阅行显示标题、未读数、feed URL 和「缓存」按钮，选中行高亮；点击整行切换订阅。
 - 中间列表顶部显示当前订阅标题与文章数；每篇文章显示标题、未读标记、发布日期和摘要。
 - 侧栏底部显示订阅数、未读总数与账号面板。
@@ -175,6 +177,37 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 推荐和撤回都需要 `write` scope；只读令牌会保留弹窗并给出明确错误，不会假装成功。
 - 真实的推荐行由 `/v1/sync` 下发；网页或其他设备上的改动会在下一次同步后出现在列表里。
 
+### 收藏网页（Shift+B）
+
+- 任意界面按 `Shift+B` 打开「收藏网页」弹窗：输入网址（可直接粘贴不带 `https://` 的地址，
+  弹窗打开时若剪贴板里是网址会自动预填），回车或点「收藏」开始下载。
+- 下载在后台线程完成，产物是 **Markdown + 图片**：
+  1. 用 `dom_smoothie`（Readability.js 的 Rust 移植）抽正文、标题、站点与语言；
+  2. 正文经过本地清洗（隐藏节点、懒加载图片、白名单标签、绝对地址），再用 `htmd`
+     （turndown.js 的 Rust 移植）转成 Markdown；
+  3. 正文里的图片按原始绝对地址下载进 `cached_images`，Markdown 里保留图片链接；
+  4. 正文 Markdown 写入 SQLite 的 `documents` 表，之后离线浏览：阅读面板用
+     `pulldown-cmark` 把 Markdown 渲染回块 HTML，图片从本地缓存取。
+- 「我的收藏」按收藏时间倒序列出标题、站点、日期、图片数与网址（列表右上角也有「＋ 收藏」入口）；
+  点击在右侧阅读，行内「移除」删除收藏（连同它的 Markdown 正文）。
+  重复收藏同一个网址只保留一条并刷新内容。
+- 收藏是**本地资料**，不参与 `/v1/sync`，退出登录或切换账号不会清空；没有登录态也能用。
+- 弹窗里会显示下载进度文案与失败原因（地址不合法、页面不是 HTML、抓取超时等），
+  失败时弹窗保留，改完地址可直接重试。正文抽取是启发式的：视频页、需要登录的页面
+  可能抽不到正文，会给出「没有抽取到可读正文」的提示。
+- **按站点适配抓取方式**：微信公众平台（`mp.weixin.qq.com`）用桌面 UA 会被重定向到
+  「环境异常 / 完成验证后即可继续访问」验证页，因此公众号文章改用微信内浏览器的 UA
+  请求，并只取文章正文容器 `#js_content`；如果站点仍然返回验证页/登录墙，会明确报错
+  「这个页面要求人工验证或登录」而**不会把验证页当成文章保存**。
+- 正文图片同时识别 `data-src` / `data-original` / `data-lazy-src` 等懒加载属性
+  （微信、知乎等站点的正文图片走这些属性）；`display:none` / `hidden` 的不可见节点整棵跳过
+  （微信小标题两侧的 `unset` 标记就是这样藏起来的，不会再出现在正文里）。
+- **X（Twitter）帖子**按帖子结构抽取：从页面 SSR 数据里取长推文全文（`note_tweet`），
+  标题用正文第一行（过长截断），正文按空行分段；引用帖作为引用块附在后面，
+  不会混入「Post / Log in / Sign up」这类界面文字，也不会把「作者 on X」当标题。
+- 收藏的网页没有译文，阅读面板只显示原文，不出现 `原文 | 对照 | 译文` 切换；
+  标题旁的 `↗` 仍然打开原网址。
+
 ### 离线缓存与加载策略
 
 - **本地优先**：正文、译文和图片第一次成功取回后写入 SQLite；之后打开同一篇时，
@@ -203,7 +236,8 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 
 ### 快捷键与鼠标
 
-- 全局：`j` / `k` 下一篇 / 上一篇；`Shift+J` / `Shift+K` 下一个 / 上一个博客。
+- 全局：`j` / `k` 下一篇 / 上一篇；`Shift+J` / `Shift+K` 下一个 / 上一个博客；
+  `Shift+B` 收藏一个网址（打开「收藏网页」弹窗）。
 - 阅读：`o` 原文、`c` 对照、`t` 译文、`↑` / `↓` 逐行滚动、
   `PgUp` / `PgDn` 按视口滚动（一篇到底、不切页）、`r` 重试。
 - 鼠标：点击订阅/文章切换，滚轮滚动，正文文字可选中。
@@ -215,6 +249,8 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
   长文连续滚动、无译文回退与已读状态；`TELA_DEV_SEED=0` 可关闭演示数据写入。
 - 演示数据还包含 1 条推荐，可直接查看「我的推荐」列表；演示模式没有账号，推荐/取消推荐
   会提示需要登录（写操作不会落库）。
+- 演示数据不含收藏（收藏是用户自己提交的网址）；按 `Shift+B` 收藏一个真实网址仍然可用
+  （需要联网），收藏结果落在同一个本地库。
 
 ### 当前限制
 
@@ -223,6 +259,12 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 没有周期性后台同步；目前是启动时同步一次，登录/标记已读等操作后再同步。
 - 没有搜索、Discover、文件夹、高亮/笔记、OPML 与自动更新入口。
 - 推荐只在「我的推荐」里管理；没有成员个人页或公开推荐页。
+- 收藏的正文抽取是启发式的，不解析 `srcset` / `<picture>`，也不执行页面脚本；
+  X 帖子只保存当前这一条（含引用帖），不展开整个讨论串；
+- Markdown 已经作为收藏正文的规范格式存进本地库，但界面暂时没有「导出 Markdown」入口；
+  PDF/DOCX/PPTX 等非 HTML 文件暂不支持（下一阶段再接 `markitdown-core`）；
+  需要登录、纯前端渲染或强制人机验证的页面可能抽不到正文（会明确报错，不保存空文章）。
+  收藏没有云端同步与导入/导出。
 - 缓存没有容量上限、占用统计或清理入口；目前只能手动删除本地库文件。
 - 图片只解析 `<img src>`，不处理 `srcset` / `<picture>`。
 
@@ -233,17 +275,21 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
 
 # 无窗口数据链路冒烟（CI 用）
 TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
-  cargo run -p tela-app --features gui --bin tela-gui --locked -- --check
-# → tela-gui check: feeds=2 articles=4 unread=3
+  cargo run -p tela-app --features gui --bin tela-gui --locked -- --demo --check
+# → tela-gui check: mode=demo feeds=2 articles=4 unread=3 recommendations=1 bookmarks=0
 ```
 
 ![S3 三栏 + 对照阅读](docs/images/gui-s3-reader.png)
+
+![S8 我的收藏 + 收藏的网页阅读](docs/images/gui-s8-bookmarks.png)
+
+![S8 Shift+B 收藏网页弹窗](docs/images/gui-s8-bookmark-dialog.png)
 
 更多截图与逐条验收命令见 [`docs/gui_acceptance.md`](./docs/gui_acceptance.md)。
 
 ## 本地缓存与离线数据
 
-SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
+SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 
 | 表 | 内容 |
 |---|---|
@@ -253,13 +299,18 @@ SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
 | `bodies` | `contentKey` → 不可变正文对象 JSON |
 | `cached_translations` | `(contentKey, lang)` → 译文状态 + 可读译本对象 JSON（含 pending/none 快照） |
 | `cached_images` | 图片 URL → 原始字节 BLOB |
+| `bookmarks` | `Shift+B` 收藏的网页：URL、标题、站点、摘要、正文 key、图片数、收藏时间 |
+| `documents` | 收藏网页的 Markdown 正文（`content_key` → markdown + 语言 + 更新时间） |
 
 - 打开文章时先读本地；没有正文才请求 `/v1/bodies`，没有译文快照才查翻译状态。
+- 收藏的网页正文以 Markdown 放 `documents`（key 以 `web-` 开头），图片放 `cached_images`；
+  阅读时 Markdown 渲染成块 HTML，图片从本地缓存读取；这类正文没有远端译文，
+  阅读面板直接按原文显示，不查翻译状态。旧版本收藏的块正文存在 `bodies`，仍可读取。
 - 没有译文时按需 `POST /v1/translations` 并在后台轮询；完成后写入缓存。
 - 图片通过 `ContentApi::load_image` 带认证下载，字节写入 `cached_images`；阅读面板只在内存里
   缓存解码后的 `Image`，跨进程靠 SQLite。
 - 退出登录 / 切换账号会清同步行与待发队列，但保留 `bodies` / `cached_translations` /
-  `cached_images`（内容不含账号私有数据）；`sync --full` 的快照 reset 同样不清这些缓存。
+  `cached_images` 与 `bookmarks`（内容不含账号私有数据）；`sync --full` 的快照 reset 同样不清这些缓存。
 - 当前没有缓存容量上限、占用统计或清理命令；需要时可直接删除 `TELA_DB` 指向的库文件。
 
 更细的字段与迁移说明见 [`docs/real-api.md`](./docs/real-api.md)。
@@ -271,10 +322,10 @@ SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
 | 路径 | 职责 |
 |---|---|
 | `crates/tela-proto` | v1 wire 类型（14 张同步表、17 种 mutation、me/usage/meta）、错误、已读规则 |
-| `crates/tela-store` | SQLite schema v4：行、不透明游标、离线队列、正文/译文/图片缓存 |
+| `crates/tela-store` | SQLite schema v6：行、不透明游标、离线队列、正文/译文/图片缓存、网页收藏与 Markdown 正文 |
 | `crates/tela-sync` | 拉取编排（reset/more/重试）、推送队列、状态快照 |
 | `crates/tela-net` | OAuth PKCE、回环回调、系统凭据库、Bearer 客户端、错误映射 |
-| `crates/tela-content` | 正文/译本模型、`/v1/bodies`、翻译状态与对象、图片字节接口 |
+| `crates/tela-content` | 正文/译本模型、`/v1/bodies`、翻译状态与对象、图片字节接口、网页抓取与 Markdown 抽取（`webpage`/`markdown`） |
 | `crates/tela-ui` | 纯视图模型（`shell`/`reader/*`）+ GPUI 视图（`gui/*`） |
 | `crates/tela-app` | 装配（`services.rs`）、本地缓存层（`content_cache.rs`）、终端 CLI、GPUI 入口 |
 | `tests/fixtures/api/` | 官方 v1 示例响应体（同步/变更/me/usage/meta/翻译） |
@@ -301,8 +352,8 @@ SQLite 采用 schema v4（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.2 -m "Tela Desktop v0.4.2"
-git push origin v0.4.2
+git tag -a v0.4.3 -m "Tela Desktop v0.4.3"
+git push origin v0.4.3
 ```
 
 推送 tag 后：
@@ -320,8 +371,8 @@ git push origin v0.4.2
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.2-rc.1 -m "Tela Desktop v0.4.2-rc.1"
-git push origin v0.4.2-rc.1
+git tag -a v0.4.3-rc.1 -m "Tela Desktop v0.4.3-rc.1"
+git push origin v0.4.3-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；
@@ -353,13 +404,14 @@ Visual C++ Redistributable。`release.yml` 在打包前会扫描两个 exe 的�
 
 | 文档 | 内容 |
 |---|---|
+| [更新日志](./CHANGELOG.md) | 按版本记录桌面端的主要变化 |
 | [真实 API 接入](./docs/real-api.md) | OAuth、同步/推送、正文/翻译、退出码、测试与下一步 |
 | [剩余工作盘点](./docs/remaining-work.md) | 对照 M0–M5 与 P0/P1 的逐项状态、估算与下一批切片 |
 | [API 方案（历史）](./docs/api-proposal.md) | 服务端公开 API 之前的调研与提议；现状以官方 v1 文档为准 |
 | [架构设计](./docs/architecture.md) | 进程/线程、crate 划分、SQLite、同步/reducer、渲染管线 |
 | [产品设计](./docs/product-design.md) | 目标用户、功能范围、关键界面、路线图 |
 | [开发计划](./docs/development_plan.md) | 阶段/切片、接口契约、验收命令 |
-| [GUI 验收](./docs/gui_acceptance.md) | S0–S4 的交付、命令实测、截图 |
+| [GUI 验收](./docs/gui_acceptance.md) | S0–S8 的交付、命令实测、截图 |
 
 ## 调研基线
 

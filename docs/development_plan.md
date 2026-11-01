@@ -161,7 +161,7 @@ P1（Discover 五 tab、关注与 Following、博客卷读写、通知、多窗�
 | `tela-store` | SQLite schema 与迁移、行应用（`apply_pull`）、查询视图、本地待发队列（pending mutations）、FTS5 标题/摘要索引 | `rusqlite`, `tela-proto`, `im` | 不决定"何时拉取"、不渲染 |
 | `tela-sync` | 同步编排：cursor 单线程推进、`reset` 清库重建、`more` 连续拉取、推送批量与幂等（mutation `mid`）、冲突回滚 | `tela-proto`, `tela-store`, `tela-net` | 不直接持有 UI 状态、不写 HTTP 细节 |
 | `tela-net` | HTTP 客户端（`reqwest`）、认证（Cookie jar / 未来 Bearer）、头部注入（`x-tela-client`=3、`x-tela-member`）、超时重试、错误映射 | `reqwest`, `tokio`, `tela-proto`, `keyring` | 不解析业务语义、不碰 SQLite |
-| `tela-content` | 正文对象：`c/<contentKey>.json` 取回后的块模型、HTML→块（`scraper`）、图片下载与解码调度（`image`） | `scraper`, `image`, `tela-net` | 不做排版/绘制 |
+| `tela-content` | 正文对象：`c/<contentKey>.json` 取回后的块模型、HTML→块（`html5ever` + `markup5ever_rcdom`）、网页收藏抓取与 Markdown 抽取（`webpage`，`dom_smoothie` + `htmd`）、Markdown→块（`markdown`，`pulldown-cmark`）、图片下载与解码调度（`image`） | `html5ever`, `markup5ever_rcdom`, `dom_smoothie`, `htmd`, `pulldown-cmark`, `image`, `tela-net` | 不做排版/绘制 |
 | `tela-ui` | 视图层：三栏列表、阅读视图、翻译对照、主题与设置；`gpui-kit` 组件 | `gpui-kit`, `tela-store`, `tela-content`, `tela-sync`, `tela-net`（仅系统浏览器） | 不直接发 HTTP、不写 SQL |
 | `tela-app` | 入口：进程/线程拓扑、`gpui::Application` 启动、命令面板与快捷键注册、`--self-check` / `--version` 冒烟入口 | 全部 | 不含业务规则 |
 

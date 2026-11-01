@@ -11,7 +11,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -66,7 +66,18 @@ rand = "0.9"
 # 查询串编码（cursor 是不透明字符串，必须完整百分号编码）。
 urlencoding = "2"
 # M2/M3 起（tela-content）：
-scraper = "0.29"
+#
+# 网页收藏（`Shift+B`）要把任意网页抽成正文并转 Markdown：
+# - dom_smoothie（Readability.js 移植）负责通用网页的正文/标题/站点识别；
+# - html5ever + rcdom 只用于本地清洗（隐藏节点、懒加载图片、白名单标签、绝对地址），
+#   这一步只需标签/属性/文本/后代遍历，因此仍然手写、不引入选择器引擎；
+# - htmd（turndown.js 移植）把清洗后的 HTML 转成 Markdown；
+# - pulldown-cmark 在阅读时把 Markdown 渲染回块 HTML。
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
+dom_smoothie = "0.19"
+htmd = "0.5"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 image = "0.25"
 # 贯穿各里程碑：
 tracing = "0.1"

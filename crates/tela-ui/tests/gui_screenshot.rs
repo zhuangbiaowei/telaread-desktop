@@ -14,7 +14,7 @@ use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
-use tela_ui::shell::{ArticleItem, FeedItem, ShellData};
+use tela_ui::shell::{ArticleItem, BookmarkItem, BookmarkService, FeedItem, ShellData};
 
 struct DemoData;
 
@@ -94,6 +94,53 @@ impl ShellData for DemoData {
     fn chapter_request(&self, _article_id: i64) -> Result<ChapterRequest, TelaError> {
         Ok(ChapterRequest::new(MOCK_CONTENT_KEY, "zh-Hans"))
     }
+
+    fn bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        Ok(vec![
+            BookmarkItem {
+                id: 1,
+                url: "https://example.com/bookmarks/offline-reading".to_string(),
+                title: "离线阅读的三种做法".to_string(),
+                site: "Tela 示例博客".to_string(),
+                image_count: 2,
+                created_at: 1_761_350_700_000,
+            },
+            BookmarkItem {
+                id: 2,
+                url: "https://example.com/bookmarks/rust-in-2026".to_string(),
+                title: "Rust 2026：值得关注的五件事".to_string(),
+                site: "技术随笔".to_string(),
+                image_count: 0,
+                created_at: 1_761_350_400_000,
+            },
+        ])
+    }
+
+    fn bookmark_request(&self, _bookmark_id: i64) -> Result<ChapterRequest, TelaError> {
+        Ok(ChapterRequest::new(MOCK_CONTENT_KEY, "zh-Hans"))
+    }
+}
+
+/// 截图用的收藏服务替身：只提供能力，不真的联网。
+struct StubBookmarks;
+
+impl BookmarkService for StubBookmarks {
+    fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError> {
+        Err(TelaError::Config {
+            detail: format!("截图模式不下载 {url}"),
+        })
+    }
+
+    fn remove_bookmark(&self, _bookmark_id: i64) -> Result<(), TelaError> {
+        Ok(())
+    }
+}
+
+fn screenshot_dir() -> std::path::PathBuf {
+    // 测试进程的 CWD 是 crate 根目录；截图统一落到 workspace 的 target/ 下（已忽略）。
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target/gui-screenshots")
 }
 
 fn content() -> Arc<dyn ContentApi> {
@@ -139,6 +186,85 @@ fn captures_the_three_pane_reader() {
         .join("target/gui-screenshots");
     std::fs::create_dir_all(&dir).expect("create screenshot dir");
     let path = dir.join("s3-reader.png");
+    image.save(&path).expect("save screenshot");
+    eprintln!("saved {}", path.display());
+}
+
+/// 「我的收藏」列表 + `Shift+B` 收藏弹窗的截图（README/验收用）。
+#[test]
+#[ignore = "需要本机 WGPU headless renderer；CI 无 GPU 适配器"]
+fn captures_bookmarks_pane_and_dialog() {
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(DemoData);
+    let content = content();
+    let bookmarks: Arc<dyn BookmarkService> = Arc::new(StubBookmarks);
+    let handle = cx
+        .open_window(size(px(1100.), px(720.)), move |_, cx| {
+            cx.new(|cx| {
+                ShellView::new_with_bookmarks(data, content, None, None, None, Some(bookmarks), cx)
+            })
+        })
+        .expect("open headless window");
+    let view = cx.update(|cx| handle.entity(cx)).expect("root view entity");
+
+    // 首帧 + 后台正文取数完成后再渲染一帧。
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // 切到「我的收藏」并打开第一条收藏。
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.show_bookmarks(cx));
+            assert!(view.select_bookmark(1, cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    let dir = screenshot_dir();
+    std::fs::create_dir_all(&dir).expect("create screenshot dir");
+    let image = cx
+        .capture_screenshot(handle.into())
+        .expect("capture bookmarks screenshot");
+    let path = dir.join("s8-bookmarks.png");
+    image.save(&path).expect("save screenshot");
+    eprintln!("saved {}", path.display());
+
+    // Shift+B 收藏弹窗。
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| view.open_bookmark_dialog(window, cx));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    let image = cx
+        .capture_screenshot(handle.into())
+        .expect("capture dialog screenshot");
+    let path = dir.join("s8-bookmark-dialog.png");
     image.save(&path).expect("save screenshot");
     eprintln!("saved {}", path.display());
 }

@@ -16,9 +16,9 @@ use crate::schema;
 
 /// 当前 schema 版本。
 ///
-/// v3 新增 `cached_translations`，v4 新增 `cached_images`；旧库升级只补表，
-/// 不会丢正文/译文缓存与离线队列。
-pub const LATEST_SCHEMA_VERSION: i64 = 4;
+/// v3 新增 `cached_translations`，v4 新增 `cached_images`，v5 新增 `bookmarks`，
+/// v6 新增 `documents`（收藏网页的 Markdown 正文）；旧库升级只补表，不会丢任何数据。
+pub const LATEST_SCHEMA_VERSION: i64 = 6;
 
 const META_SCHEMA_VERSION: &str = "schema_version";
 const META_SYNC_CURSOR: &str = "sync_cursor";
@@ -462,6 +462,18 @@ impl Store {
             .map_err(|_| store_error(StoreStage::Query, &self.path))
     }
 
+    /// 删除一个正文对象（删除收藏时清掉它引用的正文）。
+    pub fn delete_body(&mut self, content_key: &str) -> Result<bool, TelaError> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM bodies WHERE content_key = ?1",
+                params![content_key],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(affected > 0)
+    }
+
     /// 缓存的正文对象数。
     pub fn body_count(&self) -> Result<usize, TelaError> {
         let count: i64 = self
@@ -581,6 +593,187 @@ impl Store {
             .map_err(|_| store_error(StoreStage::Query, &self.path))?;
         Ok(usize::try_from(count).unwrap_or(0))
     }
+
+    // ---- 本地网页收藏（`Shift+B`） ----
+
+    /// 写入（或刷新）一条收藏；同一个 URL 只保留一条。
+    ///
+    /// 再次收藏同一个 URL 时刷新标题/正文/图片数，但保留最初的 `created_at`：
+    /// 「我的收藏」按第一次收藏的时间排序，不会因为刷新内容跳到最前面。
+    pub fn put_bookmark(&mut self, bookmark: &BookmarkInput) -> Result<i64, TelaError> {
+        self.conn
+            .execute(
+                "INSERT INTO bookmarks
+                     (url, title, site, lang, excerpt, content_key, image_count, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(url) DO UPDATE SET
+                     title = excluded.title,
+                     site = excluded.site,
+                     lang = excluded.lang,
+                     excerpt = excluded.excerpt,
+                     content_key = excluded.content_key,
+                     image_count = excluded.image_count",
+                params![
+                    bookmark.url,
+                    bookmark.title,
+                    bookmark.site,
+                    bookmark.lang,
+                    bookmark.excerpt,
+                    bookmark.content_key,
+                    bookmark.image_count,
+                    bookmark.created_at,
+                ],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        self.bookmark_id_by_url(&bookmark.url)?
+            .ok_or_else(|| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 按 URL 查收藏 id。
+    pub fn bookmark_id_by_url(&self, url: &str) -> Result<Option<i64>, TelaError> {
+        self.conn
+            .query_row(
+                "SELECT id FROM bookmarks WHERE url = ?1",
+                params![url],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 全部收藏，按收藏时间倒序（最近收藏的在前）。
+    pub fn list_bookmarks(&self) -> Result<Vec<BookmarkRow>, TelaError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, url, title, site, lang, excerpt, content_key, image_count, created_at
+                 FROM bookmarks ORDER BY created_at DESC, id DESC",
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(BookmarkRow {
+                    id: row.get(0)?,
+                    url: row.get(1)?,
+                    title: row.get(2)?,
+                    site: row.get(3)?,
+                    lang: row.get(4)?,
+                    excerpt: row.get(5)?,
+                    content_key: row.get(6)?,
+                    image_count: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        rows.collect::<Result<Vec<BookmarkRow>, _>>()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 按 id 读一条收藏。
+    pub fn get_bookmark(&self, id: i64) -> Result<Option<BookmarkRow>, TelaError> {
+        self.conn
+            .query_row(
+                "SELECT id, url, title, site, lang, excerpt, content_key, image_count, created_at
+                 FROM bookmarks WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(BookmarkRow {
+                        id: row.get(0)?,
+                        url: row.get(1)?,
+                        title: row.get(2)?,
+                        site: row.get(3)?,
+                        lang: row.get(4)?,
+                        excerpt: row.get(5)?,
+                        content_key: row.get(6)?,
+                        image_count: row.get(7)?,
+                        created_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 删除一条收藏；返回被删的那条（调用方据此清理正文缓存）。
+    pub fn delete_bookmark(&mut self, id: i64) -> Result<Option<BookmarkRow>, TelaError> {
+        let existing = self.get_bookmark(id)?;
+        self.conn
+            .execute("DELETE FROM bookmarks WHERE id = ?1", params![id])
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(existing)
+    }
+
+    /// 收藏条数。
+    pub fn bookmark_count(&self) -> Result<usize, TelaError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM bookmarks", [], |row| row.get(0))
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    // ---- 收藏网页的 Markdown 正文 ----
+
+    /// 写入（或覆盖）一条收藏网页的 Markdown 正文。
+    pub fn put_document(
+        &mut self,
+        content_key: &str,
+        markdown: &str,
+        lang: &str,
+    ) -> Result<(), TelaError> {
+        self.conn
+            .execute(
+                "INSERT INTO documents (content_key, markdown, lang, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(content_key) DO UPDATE SET
+                     markdown = excluded.markdown,
+                     lang = excluded.lang,
+                     updated_at = excluded.updated_at",
+                params![content_key, markdown, lang, tela_proto::now_ms()],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(())
+    }
+
+    /// 读一条收藏网页的 Markdown 正文；不存在返回 `None`。
+    pub fn get_document(&self, content_key: &str) -> Result<Option<CachedDocument>, TelaError> {
+        self.conn
+            .query_row(
+                "SELECT content_key, markdown, lang, updated_at FROM documents WHERE content_key = ?1",
+                params![content_key],
+                |row| {
+                    Ok(CachedDocument {
+                        content_key: row.get(0)?,
+                        markdown: row.get(1)?,
+                        lang: row.get(2)?,
+                        updated_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|_| store_error(StoreStage::Query, &self.path))
+    }
+
+    /// 删除一条 Markdown 正文；返回是否存在。
+    pub fn delete_document(&mut self, content_key: &str) -> Result<bool, TelaError> {
+        let affected = self
+            .conn
+            .execute(
+                "DELETE FROM documents WHERE content_key = ?1",
+                params![content_key],
+            )
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(affected > 0)
+    }
+
+    /// 收藏网页正文条数。
+    pub fn document_count(&self) -> Result<usize, TelaError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .map_err(|_| store_error(StoreStage::Query, &self.path))?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
 }
 
 /// 一条缓存的译本快照。
@@ -596,6 +789,63 @@ pub struct CachedTranslation {
     pub object: Option<String>,
     /// 写入时间（epoch 毫秒）。
     pub updated_at: i64,
+}
+
+/// 一条收藏网页的 Markdown 正文（`documents` 表）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedDocument {
+    /// 正文对象 key（`web-` 前缀）。
+    pub content_key: String,
+    /// Markdown 正文（图片仍是原始绝对地址）。
+    pub markdown: String,
+    /// 页面声明的语言。
+    pub lang: String,
+    /// 最近一次写入时间（epoch 毫秒）。
+    pub updated_at: i64,
+}
+
+/// 一条本地网页收藏（`Shift+B`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkRow {
+    /// 本地主键（自增）。
+    pub id: i64,
+    /// 收藏的页面地址（规范化后的绝对地址，唯一）。
+    pub url: String,
+    /// 页面标题。
+    pub title: String,
+    /// 站点名（`og:site_name` 或主机名）。
+    pub site: String,
+    /// 页面声明的语言。
+    pub lang: String,
+    /// 摘要（正文第一段的前若干字符）。
+    pub excerpt: String,
+    /// 正文对象在 `bodies` 表里的 key（`web-` 前缀）。
+    pub content_key: String,
+    /// 成功落库的图片张数。
+    pub image_count: i64,
+    /// 首次收藏时间（epoch 毫秒）。
+    pub created_at: i64,
+}
+
+/// 写收藏时的入参（`id` 与 `created_at` 由调用方决定）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkInput {
+    /// 页面地址。
+    pub url: String,
+    /// 页面标题。
+    pub title: String,
+    /// 站点名。
+    pub site: String,
+    /// 页面语言。
+    pub lang: String,
+    /// 摘要。
+    pub excerpt: String,
+    /// 正文对象 key。
+    pub content_key: String,
+    /// 已落库的图片张数。
+    pub image_count: i64,
+    /// 收藏时间（epoch 毫秒）。
+    pub created_at: i64,
 }
 
 /// 一条已落库的同步行：wire 表名 + 业务主键 + wire JSON 正文。

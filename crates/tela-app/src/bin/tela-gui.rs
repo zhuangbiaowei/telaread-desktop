@@ -27,7 +27,7 @@ use tela_app::services::{AppConfig, AppServices};
 use tela_proto::TelaError;
 use tela_ui::account::AccountService;
 use tela_ui::gui::{GuiApp, run};
-use tela_ui::shell::{RecommendationService, ShellData};
+use tela_ui::shell::{BookmarkService, RecommendationService, ShellData};
 
 /// 命令行参数。
 struct Args {
@@ -101,11 +101,13 @@ fn main() {
     let data: Arc<dyn ShellData> = services.clone();
     let accounts: Arc<dyn AccountService> = services.clone();
     let recommendations: Arc<dyn RecommendationService> = services.clone();
+    let bookmarks: Arc<dyn BookmarkService> = services.clone();
     let content = services.content();
     let offline_cache = services.offline_cache();
     run(GuiApp::with_accounts(data, content, accounts)
         .with_offline_cache(offline_cache)
-        .with_recommendations(recommendations));
+        .with_recommendations(recommendations)
+        .with_bookmarks(bookmarks));
 }
 
 /// 启动失败：终端 + 数据目录里的日志各留一份，然后按错误码退出。
@@ -151,13 +153,18 @@ fn check(demo: bool) {
         Ok(rows) => rows.len(),
         Err(error) => fatal("--check 推荐列表失败", &error),
     };
+    let bookmarks = match services.list_bookmarks() {
+        Ok(rows) => rows.len(),
+        Err(error) => fatal("--check 收藏列表失败", &error),
+    };
     let mode = if services.auth().is_some() {
         "real"
     } else {
         "demo"
     };
     println!(
-        "tela-gui check: mode={mode} feeds={} articles={} unread={} recommendations={recommendations}",
+        "tela-gui check: mode={mode} feeds={} articles={} unread={} recommendations={recommendations} \
+         bookmarks={bookmarks}",
         feeds.len(),
         articles,
         unread

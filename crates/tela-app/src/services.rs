@@ -34,12 +34,12 @@ use tela_proto::{
     ReadRuleInput, RecommendationRow, Removed, SiteRow, StateRow, StoreStage, SubscriptionRow,
     SyncResponse, SyncRows, TelaError, TitleRow, Usage, is_read, now_ms,
 };
-use tela_store::Store;
+use tela_store::{BookmarkInput, BookmarkRow, Store};
 use tela_sync::{PullError, PullOptions, SyncEngine, SyncReport, SyncStatus};
 use tela_ui::account::{AccountMode, AccountService, AccountStatus, LoginTicket};
 use tela_ui::shell::{
-    ArticleItem, FeedItem, OfflineCacheService, RecommendationItem, RecommendationService,
-    ShellData,
+    ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheService, RecommendationItem,
+    RecommendationService, ShellData,
 };
 
 use crate::content_cache::CachingContentApi;
@@ -75,6 +75,9 @@ pub const DEFAULT_CLIENT_ID: &str = match option_env!("TELA_CLIENT_ID") {
 
 /// 默认译文语言（与 mock fixture 对齐）。
 pub const DEFAULT_LANG: &str = "zh-Hans";
+
+/// 收藏时下载图片的总时间预算：超过先保存已拿到的图片，其余下次重新收藏时补齐。
+pub const BOOKMARK_IMAGE_BUDGET: Duration = Duration::from_secs(15);
 
 /// 演示数据的账号标记：真实登录打开同一个库时必须先清掉它。
 pub const DEMO_ACCOUNT: &str = "demo";
@@ -736,6 +739,102 @@ impl AppServices {
         Ok(())
     }
 
+    // ---- 网页收藏（`Shift+B`） ----
+
+    /// 收藏一个网址：抓取页面 → 抽取正文 → 下载图片 → 写入本地库。
+    ///
+    /// 整个调用是阻塞的（网络 + 磁盘），GUI 把它放到后台线程；没有登录态也能用：
+    /// 收藏是用户自己的本地资料，不参与同步、不会被登出清空。
+    pub fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError> {
+        let url = tela_content::webpage::normalize_url(url)?;
+        let page = tela_content::webpage::fetch(&url)?;
+        if page.is_empty() {
+            return Err(TelaError::Config {
+                detail: "这个页面里没有抽取到可读正文（可能是视频/交互页或需要登录）；\
+                         换一个网址试试"
+                    .to_string(),
+            });
+        }
+        self.save_bookmark_page(&page)
+    }
+
+    /// 把已经抓取/解析好的网页写入本地库（`add_bookmark` 与测试共用）。
+    ///
+    /// 正文以 **Markdown** 存 `documents` 表（图片仍是原始绝对地址，字节另存
+    /// `cached_images`）；图片下载失败不阻断收藏，图片数如实记录。
+    pub fn save_bookmark_page(
+        &self,
+        page: &tela_content::webpage::WebPage,
+    ) -> Result<BookmarkItem, TelaError> {
+        let content_key = tela_content::webpage::content_key_for_url(&page.url);
+
+        // 图片先下载（不持库锁），再一次性写库：下载期间不阻塞界面上的其它读库操作。
+        let mut images: Vec<(String, Vec<u8>)> = Vec::new();
+        for src in page.images.iter().take(tela_content::webpage::MAX_IMAGES) {
+            match tela_content::webpage::fetch_bytes(src) {
+                Ok(bytes) => images.push((src.clone(), bytes)),
+                Err(_) => continue,
+            }
+        }
+
+        let mut store = self.lock_store()?;
+        store.put_document(&content_key, &page.markdown, &page.lang)?;
+        // 旧版本把正文块存在 bodies；重新收藏时清掉，避免两份正文不一致。
+        store.delete_body(&content_key)?;
+        for (src, bytes) in &images {
+            store.put_image(src, bytes)?;
+        }
+        let id = store.put_bookmark(&BookmarkInput {
+            url: page.url.clone(),
+            title: page.title.clone(),
+            site: page.site.clone(),
+            lang: page.lang.clone(),
+            excerpt: page.excerpt.clone(),
+            content_key: content_key.clone(),
+            image_count: images.len() as i64,
+            created_at: now_ms(),
+        })?;
+        let row = store.get_bookmark(id)?.ok_or_else(|| TelaError::Store {
+            stage: StoreStage::Query,
+            path: self.db_path.display().to_string(),
+        })?;
+        Ok(bookmark_item(row))
+    }
+
+    /// 本地网页收藏（按收藏时间倒序）。
+    pub fn list_bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        let store = self.lock_store()?;
+        Ok(store
+            .list_bookmarks()?
+            .into_iter()
+            .map(bookmark_item)
+            .collect())
+    }
+
+    /// 一条收藏的正文请求（正文在本地库，key 以 `web-` 开头）。
+    pub fn bookmark_request_for(&self, bookmark_id: i64) -> Result<ChapterRequest, TelaError> {
+        let store = self.lock_store()?;
+        let row = store
+            .get_bookmark(bookmark_id)?
+            .ok_or_else(|| TelaError::Content {
+                article: bookmark_id,
+                content_key: String::new(),
+                detail: "这条收藏不存在（可能已被移除）".to_string(),
+            })?;
+        Ok(ChapterRequest::new(row.content_key, self.lang.clone()))
+    }
+
+    /// 移除一条收藏：Markdown 正文与旧版本留下的正文块一起清掉。
+    pub fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError> {
+        let mut store = self.lock_store()?;
+        let Some(row) = store.delete_bookmark(bookmark_id)? else {
+            return Ok(());
+        };
+        store.delete_document(&row.content_key)?;
+        store.delete_body(&row.content_key)?;
+        Ok(())
+    }
+
     // ---- 同步 ----
 
     /// 推完再拉（阻塞）。
@@ -1034,6 +1133,10 @@ impl AppServices {
     // ---- 演示数据 ----
 
     /// 空库时写入演示订阅/文章；返回是否真的写入。
+    ///
+    /// 演示数据**不含**网页收藏：收藏来自用户自己提交的地址，出现一条
+    /// 凭空生成的“已收藏网页”会让人分不清哪些是自己加的。空列表里的
+    /// 提示会告诉用户按 `Shift+B` 开始收藏。
     pub fn seed_demo(&self) -> Result<bool, TelaError> {
         let mut store = self.lock_store()?;
         if store.row_count("subscriptions")? > 0 || store.row_count("articles")? > 0 {
@@ -1096,6 +1199,36 @@ impl ShellData for AppServices {
 
     fn recommendation(&self, article_id: i64) -> Result<Option<RecommendationItem>, TelaError> {
         self.recommendation_for(article_id)
+    }
+
+    fn bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        self.list_bookmarks()
+    }
+
+    fn bookmark_request(&self, bookmark_id: i64) -> Result<ChapterRequest, TelaError> {
+        self.bookmark_request_for(bookmark_id)
+    }
+}
+
+impl BookmarkService for AppServices {
+    fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError> {
+        AppServices::add_bookmark(self, url)
+    }
+
+    fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError> {
+        AppServices::remove_bookmark(self, bookmark_id)
+    }
+}
+
+/// 本地收藏行 → 界面项。
+fn bookmark_item(row: BookmarkRow) -> BookmarkItem {
+    BookmarkItem {
+        id: row.id,
+        url: row.url,
+        title: row.title,
+        site: row.site,
+        image_count: usize::try_from(row.image_count).unwrap_or(0),
+        created_at: row.created_at,
     }
 }
 

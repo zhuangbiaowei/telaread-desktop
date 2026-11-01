@@ -14,7 +14,7 @@
 //! | 12 | 服务端违约 | 响应形状不对、缺字段 |
 //! | 13 | 正文/渲染失败 | 没有正文、译文对象坏了 |
 //! | 20 | 网络或 API 失败 | 连接失败、5xx、404、invalid_request |
-//! | 21 | 需要用户处理 | 未登录、令牌失效、应用被停用、订阅/推荐被拒 |
+//! | 21 | 需要用户处理 | 未登录、令牌失效、应用被停用、订阅/推荐被拒、网页要求人工验证 |
 //! | 22 | 需要等待 | 429、每日额度、`apps_paused` |
 
 use std::fmt;
@@ -113,6 +113,13 @@ pub enum TelaError {
         /// 请求上下文。
         ctx: WireContext,
         /// 失败原因。
+        detail: String,
+    },
+    /// 目标网页返回的是人工验证/拦截页，而不是正文（如微信「环境异常」、Cloudflare 校验）。
+    Blocked {
+        /// 实际打开的地址（可能已被重定向到验证页）。
+        url: String,
+        /// 需要用户做什么。
         detail: String,
     },
     /// 没有可用的登录令牌，或令牌已经无法刷新。
@@ -219,6 +226,7 @@ impl TelaError {
         match self {
             Self::Config { .. } => "config",
             Self::Net { .. } => "net",
+            Self::Blocked { .. } => "blocked_page",
             Self::NotLoggedIn { .. } => "not_logged_in",
             Self::Auth { .. } => "auth",
             Self::Api { code, .. } => code,
@@ -247,6 +255,8 @@ impl TelaError {
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Net { .. } => true,
+            // 验证页要用户去浏览器里处理，客户端原样重试没有意义。
+            Self::Blocked { .. } => false,
             // `apps_paused` 是「等运维恢复」，不是可以立刻重试的瞬时故障；
             // 其余 5xx（`unavailable`、无 body 的 500/502）才值得退避重试。
             Self::Api { status, code, .. } => *status >= 500 && code != "apps_paused",
@@ -273,6 +283,8 @@ impl TelaError {
             Self::Protocol { .. } => 12,
             Self::Content { .. } | Self::Render { .. } => 13,
             Self::Net { .. } => 20,
+            // 需要用户去浏览器完成验证（登录/人机校验），与「未登录」同类。
+            Self::Blocked { .. } => 21,
             Self::NotLoggedIn { .. } | Self::Auth { .. } => 21,
             Self::Limit { .. } => 22,
             Self::Api { status, .. } => match status {
@@ -300,6 +312,12 @@ impl fmt::Display for TelaError {
                 "{} → {} → 请求失败：{}；检查网络、代理与系统时间后重试",
                 ctx.url, ctx.object, detail
             ),
+            Self::Blocked { url, detail } => {
+                write!(
+                    f,
+                    "{url} → webpage → {detail}；用浏览器打开它、完成验证后再收藏"
+                )
+            }
             Self::NotLoggedIn { detail } => {
                 write!(f, "config → login → {detail}；先运行 `tela-app login`")
             }

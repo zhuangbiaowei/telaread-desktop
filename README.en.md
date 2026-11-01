@@ -4,11 +4,12 @@ A desktop reader for [Tela](https://telaread.com) (Rust + [GPUI Kit](https://git
 
 English | [简体中文](./README.md)
 
-> **Current status**: **The real API v1 foundation is wired up** — OAuth 2.1 + PKCE login, refresh
+> **Current status (v0.4.3)**: **The real API v1 foundation is wired up** — OAuth 2.1 + PKCE login, refresh
 > tokens stored in the OS credential store, full/incremental sync, an offline mutation queue,
 > local-first reading of bodies/translations/images, one-click per-subscription offline caching,
-> article recommendations and "My Recommendations", automatic pause of translation polling when
-> offline, a terminal CLI, and an offline GUI demo.
+> article recommendations and "My Recommendations", `Shift+B` bookmarking of any web page into
+> "My Bookmarks", automatic pause of translation polling when offline, a terminal CLI, and an
+> offline GUI demo.
 > The protocol follows the official [authorization.md](https://github.com/hutusi/tela/blob/main/docs/api/authorization.md)
 > and [v1.md](https://github.com/hutusi/tela/blob/main/docs/api/v1.md) (read in full on 2026-10-28).
 > See [`docs/real-api.md`](./docs/real-api.md) for implementation details.
@@ -146,9 +147,9 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 ### Window and layout
 
 - Default window 1100×720, minimum 880×560; titled `Tela Desktop`, and closing the last window quits the app.
-- Three columns: subscription list on the left (260 px), the current subscription's articles or "My Recommendations" in the middle (340–360 px), and the reading panel on the right (responsive).
+- Three columns: subscription list on the left (260 px), the current subscription's articles, "My Recommendations" or "My Bookmarks" in the middle (340–360 px), and the reading panel on the right (responsive).
 - The top-left is the "TelaRead" brand; clicking it opens <https://telaread.com> in the system browser. Below it is the current subscription status.
-- Above the subscription list is the "My Recommendations" entry, showing the number of recommended articles; clicking it switches to the recommendations list.
+- Above the subscription list are the "My Recommendations" and "My Bookmarks" entries, each showing its item count; clicking one switches to that list.
 - Each subscription row shows its title, unread count, feed URL and a "Cache" button; the selected row is highlighted, and clicking anywhere on the row switches subscription.
 - The middle list header shows the current subscription title and article count; each article shows its title, unread marker, publish date and summary.
 - The bottom of the sidebar shows the subscription count, total unread count and the account panel.
@@ -174,6 +175,22 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 - Recommending and withdrawing both require the `write` scope; with a read-only token the modal stays open with a clear error and never pretends to succeed.
 - Real recommendation rows come from `/v1/sync`; changes made on the web or another device appear in the list after the next sync.
 
+### Bookmarking a web page (Shift+B)
+
+- Press `Shift+B` anywhere to open the "Bookmark web page" modal: enter a URL (a bare `example.com/post` works — `https://` is added, and a URL already in the clipboard is prefilled), then press Enter or click "Bookmark".
+- The download runs on a background thread and produces **Markdown + images**:
+  1. `dom_smoothie` (a Readability.js port) extracts the body, title, site and language;
+  2. the body is cleaned locally (hidden nodes, lazy images, whitelisted tags, absolute URLs) and converted to Markdown with `htmd` (a turndown.js port);
+  3. body images are downloaded into `cached_images` under their original absolute URLs, and the Markdown keeps those links;
+  4. the Markdown body is written to the local `documents` table. Offline browsing renders it back into block HTML with `pulldown-cmark` and reads images from the local cache.
+- "My Bookmarks" lists entries newest first with title, site, date, image count and URL (the list header also has a "＋ 收藏" / "+ Bookmark" entry); clicking one opens it in the reading panel, and "Remove" on the row deletes it (together with its Markdown body). Bookmarking the same URL twice keeps a single entry and refreshes its content.
+- Bookmarks are **local data**: they are not part of `/v1/sync`, survive sign-out and account switches, and work without being signed in.
+- The modal shows download progress and the failure reason (invalid URL, non-HTML response, timeout, …); on failure it stays open so the URL can be fixed and retried. Body extraction is heuristic: video pages and login-gated pages may yield nothing, in which case the modal reports that no readable body was found.
+- **Per-site fetching**: `mp.weixin.qq.com` redirects desktop user agents to a "环境异常 / complete the verification" page, so WeChat articles are fetched with the in-app WeChat browser user agent and only the `#js_content` body container is used. If a site still returns a verification page or login wall, the modal reports "this page requires human verification" instead of **saving the verification page as an article**.
+- Body images also honour `data-src` / `data-original` / `data-lazy-src` (lazy-loaded images on WeChat, Zhihu, …); invisible nodes (`display:none` / `hidden`) are skipped entirely, so WeChat's hidden `unset` markers around subheadings no longer leak into the text.
+- **X (Twitter) posts** are extracted structurally: the full long-post text (`note_tweet`) comes from the page's SSR data, the title is the first line of the post (truncated when long), and the body is split into paragraphs; a quoted post is appended as a blockquote. UI chrome such as "Post / Log in / Sign up" or an "Author on X" title never leaks into the article.
+- Bookmarked pages have no translation, so the reading panel shows the original only (no `Original | Compare | Translation` switcher); the `↗` next to the title still opens the original URL.
+
 ### Offline cache and loading strategy
 
 - **Local first**: bodies, translations and images are written to SQLite after the first successful fetch; opening the same article later reads the cached body, translation and images directly, without calling `/v1/bodies`, `/v1/translations` or `/img/…` again.
@@ -195,7 +212,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 
 ### Keyboard shortcuts and mouse
 
-- Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog.
+- Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog; `Shift+B` bookmark a URL (opens the "Bookmark web page" modal).
 - Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry.
 - Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable.
 
@@ -204,6 +221,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 - `--demo` or `TELA_DEMO=1` uses the in-process mock, requiring no account or network.
 - An empty DB is seeded with 2 subscriptions and 4 articles (normal / long chapter / no translation / already read), covering the three views, long-article continuous scrolling, fallback without translation and the read state; `TELA_DEV_SEED=0` disables seeding.
 - The demo data also includes 1 recommendation so you can inspect the "My Recommendations" list directly; demo mode has no account, so recommending/withdrawing shows that sign-in is required (write operations never hit the DB).
+- The demo data has no bookmarks (bookmarks come from URLs the user submits); pressing `Shift+B` and bookmarking a real URL still works (network required) and is stored in the same local DB.
 
 ### Current limitations
 
@@ -212,6 +230,8 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 - There is no periodic background sync; currently it syncs once at startup and again after sign-in, mark-as-read and similar actions.
 - There is no search, Discover, folders, highlights/notes, OPML or auto-update entry point.
 - Recommendations are only managed in "My Recommendations"; there is no member profile or public recommendations page.
+- Bookmark body extraction is heuristic: it does not parse `srcset` / `<picture>` and does not run page scripts, so login-gated, client-rendered or human-verification pages may yield no body text (a clear error is shown instead of saving an empty article). An X post saves the root post plus its quoted post, not the whole thread.
+- Markdown is already the canonical stored format for bookmarks, but there is no "Export Markdown" UI yet; non-HTML files (PDF/DOCX/PPTX) are not supported yet (a later `markitdown-core` step). Bookmarks have no cloud sync.
 - The cache has no size limit, usage statistics or cleanup entry point; for now you can only delete the local DB file manually.
 - Images only parse `<img src>`, not `srcset` / `<picture>`.
 
@@ -223,16 +243,20 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
 # Headless data-path smoke test (used by CI)
 TELA_DB=target/ci-gui.db TELA_DEV_SEED=1 \
   cargo run -p tela-app --features gui --bin tela-gui --locked -- --check
-# → tela-gui check: feeds=2 articles=4 unread=3
+# → tela-gui check: mode=demo feeds=2 articles=4 unread=3 recommendations=1 bookmarks=0
 ```
 
 ![S3 three-column layout + side-by-side reading](docs/images/gui-s3-reader.png)
+
+![S8 My Bookmarks + reading a bookmarked page](docs/images/gui-s8-bookmarks.png)
+
+![S8 Shift+B bookmark modal](docs/images/gui-s8-bookmark-dialog.png)
 
 More screenshots and per-item acceptance commands are in [`docs/gui_acceptance.md`](./docs/gui_acceptance.md).
 
 ## Local cache and offline data
 
-SQLite uses schema v4 (opening an older DB only adds tables and never loses existing data):
+SQLite uses schema v6 (opening an older DB only adds tables and never loses existing data):
 
 | Table | Contents |
 |---|---|
@@ -242,11 +266,14 @@ SQLite uses schema v4 (opening an older DB only adds tables and never loses exis
 | `bodies` | `contentKey` → immutable body object JSON |
 | `cached_translations` | `(contentKey, lang)` → translation status + readable translation object JSON (including pending/none snapshots) |
 | `cached_images` | Image URL → raw bytes BLOB |
+| `bookmarks` | Pages bookmarked with `Shift+B`: URL, title, site, excerpt, body key, image count, bookmarked-at |
+| `documents` | Markdown body of bookmarked pages (`content_key` → markdown + language + updated-at) |
 
 - Opening an article reads local data first; only requests `/v1/bodies` when the body is missing, and checks translation status only when there is no translation snapshot.
 - Without a translation it sends `POST /v1/translations` on demand and polls in the background; once complete it writes to the cache.
+- A bookmarked page's Markdown body lives in `documents` (key prefixed with `web-`) and its images in `cached_images`; the reader renders the Markdown into blocks and resolves images from the local cache. Such bodies have no remote translation, so the reading panel shows the original directly without querying translation state. Legacy block bodies stored in `bodies` by older versions are still readable.
 - Images are downloaded with authentication via `ContentApi::load_image`, and the bytes are written to `cached_images`; the reading panel only caches decoded `Image` objects in memory, relying on SQLite across processes.
-- Signing out / switching accounts clears sync rows and the pending queue but keeps `bodies` / `cached_translations` / `cached_images` (their content contains no account-private data); the snapshot reset from `sync --full` also leaves these caches untouched.
+- Signing out / switching accounts clears sync rows and the pending queue but keeps `bodies` / `cached_translations` / `cached_images` and `bookmarks` (their content contains no account-private data); the snapshot reset from `sync --full` also leaves these caches untouched.
 - There is currently no cache size limit, usage statistics or cleanup command; delete the DB file that `TELA_DB` points to when needed.
 
 See [`docs/real-api.md`](./docs/real-api.md) for detailed fields and migration notes.
@@ -258,10 +285,10 @@ Dependencies flow in one direction: `tela-app → {tela-ui, tela-sync} → {tela
 | Path | Responsibility |
 |---|---|
 | `crates/tela-proto` | v1 wire types (14 sync tables, 17 mutation kinds, me/usage/meta), errors, read rules |
-| `crates/tela-store` | SQLite schema v4: rows, opaque cursor, offline queue, body/translation/image caches |
+| `crates/tela-store` | SQLite schema v6: rows, opaque cursor, offline queue, body/translation/image caches, web bookmarks and Markdown bodies |
 | `crates/tela-sync` | Pull orchestration (reset/more/retry), push queue, state snapshots |
 | `crates/tela-net` | OAuth PKCE, loopback callback, OS credential store, Bearer client, error mapping |
-| `crates/tela-content` | Body/translation models, `/v1/bodies`, translation status and objects, image byte interface |
+| `crates/tela-content` | Body/translation models, `/v1/bodies`, translation status and objects, image byte interface, page fetching and body extraction (`webpage`) |
 | `crates/tela-ui` | Pure view models (`shell`/`reader/*`) + GPUI views (`gui/*`) |
 | `crates/tela-app` | Wiring (`services.rs`), local cache layer (`content_cache.rs`), terminal CLI, GPUI entry point |
 | `tests/fixtures/api/` | Official v1 sample response bodies (sync/mutations/me/usage/meta/translation) |
@@ -286,8 +313,8 @@ Releases are automated by [`release.yml`](./.github/workflows/release.yml):
 ```bash
 # after removing the v prefix, the tag must equal tela-app's version in Cargo.toml
 # the TELA_CLIENT_ID repository variable must be configured before building (release packages embed it)
-git tag -a v0.4.2 -m "Tela Desktop v0.4.2"
-git push origin v0.4.2
+git tag -a v0.4.3 -m "Tela Desktop v0.4.3"
+git push origin v0.4.3
 ```
 
 After pushing the tag:
@@ -304,8 +331,8 @@ After pushing the tag:
 Pre-releases use a hyphenated tag and are automatically marked as prerelease:
 
 ```bash
-git tag -a v0.4.2-rc.1 -m "Tela Desktop v0.4.2-rc.1"
-git push origin v0.4.2-rc.1
+git tag -a v0.4.3-rc.1 -m "Tela Desktop v0.4.3-rc.1"
+git push origin v0.4.3-rc.1
 ```
 
 The Linux GUI depends on Wayland/Vulkan/font system libraries; the Windows package is a native
@@ -339,13 +366,14 @@ To browse demo data offline, use `tela-gui.exe --demo`.
 
 | Document | Contents |
 |---|---|
+| [Changelog](./CHANGELOG.md) | Notable desktop changes by version |
 | [Real API integration](./docs/real-api.md) | OAuth, sync/push, bodies/translation, exit codes, tests and next steps |
 | [Remaining work inventory](./docs/remaining-work.md) | Per-item status against M0–M5 and P0/P1, estimates and the next batch of slices |
 | [API proposal (historical)](./docs/api-proposal.md) | Research and proposal before the public server API; the official v1 docs are authoritative |
 | [Architecture design](./docs/architecture.md) | Processes/threads, crate layout, SQLite, sync/reducer, rendering pipeline |
 | [Product design](./docs/product-design.md) | Target users, feature scope, key screens, roadmap |
 | [Development plan](./docs/development_plan.md) | Phases/slices, interface contracts, acceptance commands |
-| [GUI acceptance](./docs/gui_acceptance.md) | S0–S4 deliverables, verified commands, screenshots |
+| [GUI acceptance](./docs/gui_acceptance.md) | S0–S8 deliverables, verified commands, screenshots |
 
 ## Research baseline
 

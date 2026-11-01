@@ -27,7 +27,7 @@ use tela_content::model::{
     TranslationRow, TranslationState, TranslationView,
 };
 use tela_proto::{ArticleRow, StoreStage, TelaError, WireContext};
-use tela_store::Store;
+use tela_store::{CachedDocument, Store};
 use tela_ui::reader::document::image_sources_in_html;
 use tela_ui::shell::{OfflineCacheProgress, OfflineCacheReport, OfflineCacheService};
 
@@ -233,6 +233,29 @@ impl CachingContentApi {
     fn cached_body(&self, content_key: &str) -> Option<ContentObject> {
         let body = self.lock_store().ok()?.get_body(content_key).ok()??;
         serde_json::from_str(&body).ok()
+    }
+
+    /// 读收藏网页的 Markdown 正文。
+    fn cached_document(&self, content_key: &str) -> Option<CachedDocument> {
+        self.lock_store().ok()?.get_document(content_key).ok()?
+    }
+
+    /// 收藏网页：Markdown 是规范格式，渲染成块后交给阅读面板。
+    ///
+    /// 旧版本收藏只存了正文块（`bodies`），这里保留回退，避免升级后读不了。
+    fn local_page_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        if let Some(document) = self.cached_document(&request.content_key) {
+            let content = tela_content::markdown::to_content(
+                &document.content_key,
+                &document.lang,
+                &document.markdown,
+            )?;
+            return Ok(Chapter::new(content, TranslationView::NotAvailable));
+        }
+        if let Some(content) = self.cached_body(&request.content_key) {
+            return Ok(Chapter::new(content, TranslationView::NotAvailable));
+        }
+        Err(local_page_missing(&request.content_key))
     }
 
     /// 写入正文对象（不可变，覆盖写也安全）。
@@ -596,6 +619,11 @@ impl CachingContentApi {
 
 impl ContentApi for CachingContentApi {
     fn load_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        // 本地收藏的网页：Markdown 正文，不存在远端译文，也不该发翻译请求。
+        if tela_content::webpage::is_local_page_key(&request.content_key) {
+            return self.local_page_chapter(request);
+        }
+
         let Some(content) = self.cached_body(&request.content_key) else {
             // 第一次打开：远端取回后立即落库。
             let chapter = self.fetch_chapter(request)?;
@@ -625,6 +653,11 @@ impl ContentApi for CachingContentApi {
     }
 
     fn refresh_chapter(&self, request: &ChapterRequest) -> Result<Chapter, TelaError> {
+        // 收藏的网页没有译文可轮询：直接读本地 Markdown。
+        if tela_content::webpage::is_local_page_key(&request.content_key) {
+            return self.local_page_chapter(request);
+        }
+
         // 轮询译文时绝不重新下载不可变正文。
         let Some(content) = self.cached_body(&request.content_key) else {
             let chapter = self.fetch_chapter(request)?;
@@ -710,6 +743,15 @@ enum RequestOutcome {
     Refused,
     /// 请求本身失败（网络/令牌）；原文仍可用，下次点击重试。
     Failed,
+}
+
+/// 本地收藏的正文不在库里（用户手动删过库，或收藏行比正文先到）。
+fn local_page_missing(content_key: &str) -> TelaError {
+    TelaError::Content {
+        article: 0,
+        content_key: content_key.to_string(),
+        detail: "本地收藏的正文已丢失；重新收藏这个网址即可恢复".to_string(),
+    }
 }
 
 /// 失败提示去重后写入报告。

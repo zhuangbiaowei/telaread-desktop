@@ -79,6 +79,62 @@ impl RecommendationItem {
     }
 }
 
+/// “我的收藏”里的一条：用户用 `Shift+B` 收藏的一个网页。
+///
+/// 它与 Tela 的文章无关：正文来自网页抽取、存在本地库，不参与同步。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkItem {
+    /// 本地收藏 id。
+    pub id: i64,
+    /// 页面地址（绝对地址）。
+    pub url: String,
+    /// 页面标题。
+    pub title: String,
+    /// 站点名（`og:site_name` 或主机名）。
+    pub site: String,
+    /// 成功保存到本地的图片张数。
+    pub image_count: usize,
+    /// 收藏时间（epoch 毫秒）。
+    pub created_at: i64,
+}
+
+impl BookmarkItem {
+    /// 列表里展示的收藏日期（UTC）。
+    pub fn created_label(&self) -> String {
+        format_published_at(self.created_at)
+    }
+
+    /// 列表里展示的站点名：`site` 为空时回退到地址里的主机名。
+    pub fn site_label(&self) -> String {
+        if !self.site.trim().is_empty() {
+            return self.site.clone();
+        }
+        host_of(&self.url).unwrap_or_else(|| self.url.clone())
+    }
+
+    /// 一行副标题：站点 · 日期 · 图片数。
+    pub fn meta_label(&self) -> String {
+        let mut label = format!("{} · {}", self.site_label(), self.created_label());
+        if self.image_count > 0 {
+            label.push_str(&format!(" · {} 张图", self.image_count));
+        }
+        label
+    }
+}
+
+/// 从绝对地址里取主机名（不引入 url crate：只在展示层用）。
+fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.trim().is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
 /// epoch 时间 → `YYYY-MM-DD`。
 ///
 /// v1 wire 的 `publishedAt` 是毫秒，但历史 fixture 和演示数据里也出现过秒；
@@ -138,6 +194,23 @@ pub trait ShellData: Send + Sync {
             .into_iter()
             .find(|item| item.article_id == article_id))
     }
+
+    /// 本地网页收藏，按收藏时间倒序。
+    ///
+    /// 默认实现返回空列表：只读测试/嵌入方不必知道收藏功能；
+    /// 真实装配由 `tela-app` 从本地库的 `bookmarks` 表构造。
+    fn bookmarks(&self) -> Result<Vec<BookmarkItem>, TelaError> {
+        Ok(Vec::new())
+    }
+
+    /// 一条收藏的正文请求（正文对象在本地库，key 以 `web-` 开头）。
+    fn bookmark_request(&self, bookmark_id: i64) -> Result<ChapterRequest, TelaError> {
+        Err(TelaError::Content {
+            article: bookmark_id,
+            content_key: String::new(),
+            detail: "当前装配没有本地网页收藏".to_string(),
+        })
+    }
 }
 
 /// 推荐写能力：供阅读面板的“推荐”按钮与推荐列表的“取消推荐”调用。
@@ -150,6 +223,18 @@ pub trait RecommendationService: Send + Sync {
 
     /// 撤回一篇文章的推荐（未推荐时也视为成功）。
     fn unrecommend(&self, article_id: i64) -> Result<(), TelaError>;
+}
+
+/// 收藏写能力：供 `Shift+B` 弹窗与「我的收藏」列表的删除按钮调用。
+///
+/// `add_bookmark` 会真的联网下载页面与图片（阻塞；调用方放到后台线程），
+/// 成功后把标题、正文块与图片全部写进本地库，并返回可直接展示的一条收藏。
+pub trait BookmarkService: Send + Sync {
+    /// 收藏一个网址：抓取页面、抽取正文、下载图片并落库。
+    fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError>;
+
+    /// 删除一条收藏（连同它引用的本地正文）；不存在时也视为成功。
+    fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError>;
 }
 
 /// 订阅级离线缓存进度（左侧博客名旁的按钮显示它）。
@@ -276,6 +361,8 @@ pub enum ShellSection {
     Feed,
     /// 成员自己的推荐列表。
     Recommendations,
+    /// 用户自己收藏的网页（`Shift+B`）。
+    Bookmarks,
 }
 
 /// 三栏外壳的当前状态。
@@ -307,6 +394,12 @@ pub struct ShellViewModel {
     pub selected_recommendation: Option<i64>,
     /// 推荐列表加载错误。
     pub recommendations_error: Option<String>,
+    /// 我的收藏（本地网页，按收藏时间倒序）。
+    pub bookmarks: Vec<BookmarkItem>,
+    /// 收藏列表的选中项。
+    pub selected_bookmark: Option<i64>,
+    /// 收藏列表加载错误。
+    pub bookmarks_error: Option<String>,
 }
 
 impl ShellViewModel {
@@ -342,6 +435,7 @@ impl ShellViewModel {
             }
         }
         self.reload_recommendations(data);
+        self.reload_bookmarks(data);
         *self != before
     }
 
@@ -367,6 +461,26 @@ impl ShellViewModel {
         self.section = ShellSection::Recommendations;
         changed |= self.reload_recommendations(data);
         changed
+    }
+
+    /// 打开“我的收藏”列表；返回视图是否需要重绘。
+    pub fn show_bookmarks(&mut self, data: &dyn ShellData) -> bool {
+        let mut changed = self.section != ShellSection::Bookmarks;
+        self.section = ShellSection::Bookmarks;
+        changed |= self.reload_bookmarks(data);
+        changed
+    }
+
+    /// 选中一条收藏；id 不在收藏列表里时忽略。
+    pub fn select_bookmark(&mut self, bookmark_id: i64) -> bool {
+        if self.selected_bookmark == Some(bookmark_id)
+            || !self.bookmarks.iter().any(|item| item.id == bookmark_id)
+        {
+            return false;
+        }
+        self.section = ShellSection::Bookmarks;
+        self.selected_bookmark = Some(bookmark_id);
+        true
     }
 
     /// 选中一条推荐；文章不在推荐列表里时忽略。
@@ -400,6 +514,7 @@ impl ShellViewModel {
         match self.section {
             ShellSection::Feed => self.step_article(1),
             ShellSection::Recommendations => self.step_recommendation(1),
+            ShellSection::Bookmarks => self.step_bookmark(1),
         }
     }
 
@@ -408,6 +523,7 @@ impl ShellViewModel {
         match self.section {
             ShellSection::Feed => self.step_article(-1),
             ShellSection::Recommendations => self.step_recommendation(-1),
+            ShellSection::Bookmarks => self.step_bookmark(-1),
         }
     }
 
@@ -463,6 +579,26 @@ impl ShellViewModel {
         true
     }
 
+    fn step_bookmark(&mut self, delta: isize) -> bool {
+        if self.bookmarks.is_empty() {
+            return false;
+        }
+        let current = self
+            .selected_bookmark
+            .and_then(|id| self.bookmarks.iter().position(|item| item.id == id));
+        let target = match current {
+            Some(index) => index.saturating_add_signed(delta),
+            None if delta > 0 => 0,
+            None => self.bookmarks.len() - 1,
+        }
+        .min(self.bookmarks.len() - 1);
+        if Some(target) == current {
+            return false;
+        }
+        self.selected_bookmark = Some(self.bookmarks[target].id);
+        true
+    }
+
     fn step_feed(&mut self, delta: isize, data: &dyn ShellData) -> bool {
         if self.feeds.is_empty() {
             return false;
@@ -503,6 +639,12 @@ impl ShellViewModel {
             .find(|item| item.article_id == id)
     }
 
+    /// 当前选中的收藏。
+    pub fn selected_bookmark_item(&self) -> Option<&BookmarkItem> {
+        let id = self.selected_bookmark?;
+        self.bookmarks.iter().find(|item| item.id == id)
+    }
+
     /// 全部订阅的未读总数。
     pub fn unread_total(&self) -> usize {
         self.feeds.iter().map(|feed| feed.unread).sum()
@@ -517,6 +659,9 @@ impl ShellViewModel {
     pub fn status_line(&self) -> String {
         if self.section == ShellSection::Recommendations {
             return format!("我的推荐 · {} 篇", self.recommendations.len());
+        }
+        if self.section == ShellSection::Bookmarks {
+            return format!("我的收藏 · {} 篇", self.bookmarks.len());
         }
         if let Some(error) = &self.feeds_error {
             return format!("订阅列表加载失败：{error}");
@@ -585,6 +730,35 @@ impl ShellViewModel {
                 self.recommendations.clone(),
                 self.selected_recommendation,
                 self.recommendations_error.clone(),
+            )
+    }
+
+    /// 从数据源刷新“我的收藏”，并保留仍然存在的选中项。
+    fn reload_bookmarks(&mut self, data: &dyn ShellData) -> bool {
+        let before = (
+            self.bookmarks.clone(),
+            self.selected_bookmark,
+            self.bookmarks_error.clone(),
+        );
+        match data.bookmarks() {
+            Ok(bookmarks) => {
+                self.bookmarks = bookmarks;
+                self.bookmarks_error = None;
+                self.selected_bookmark = self
+                    .selected_bookmark
+                    .filter(|id| self.bookmarks.iter().any(|item| item.id == *id));
+            }
+            Err(error) => {
+                self.bookmarks.clear();
+                self.selected_bookmark = None;
+                self.bookmarks_error = Some(error.to_string());
+            }
+        }
+        before
+            != (
+                self.bookmarks.clone(),
+                self.selected_bookmark,
+                self.bookmarks_error.clone(),
             )
     }
 }

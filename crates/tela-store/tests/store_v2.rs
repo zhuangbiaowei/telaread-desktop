@@ -492,3 +492,149 @@ fn clear_account_keeps_bodies() {
     assert!(store.cursor().unwrap().is_none());
     assert_eq!(store.body_count().unwrap(), 1);
 }
+
+fn bookmark(url: &str, title: &str, created_at: i64) -> tela_store::BookmarkInput {
+    tela_store::BookmarkInput {
+        url: url.to_string(),
+        title: title.to_string(),
+        site: "example.com".to_string(),
+        lang: "zh-Hans".to_string(),
+        excerpt: "摘要".to_string(),
+        content_key: "web-0123456789abcdef".to_string(),
+        image_count: 2,
+        created_at,
+    }
+}
+
+#[test]
+fn bookmarks_round_trip_newest_first() {
+    let mut store = store();
+    assert_eq!(store.bookmark_count().unwrap(), 0);
+
+    let older = store
+        .put_bookmark(&bookmark("https://example.com/a", "A 标题", 1_000))
+        .unwrap();
+    let newer = store
+        .put_bookmark(&bookmark("https://example.com/b", "B 标题", 2_000))
+        .unwrap();
+    assert_ne!(older, newer);
+
+    let rows = store.list_bookmarks().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, newer, "最近收藏的排在最前");
+    assert_eq!(rows[0].title, "B 标题");
+    assert_eq!(rows[1].id, older);
+    assert_eq!(rows[0].image_count, 2);
+
+    let fetched = store.get_bookmark(older).unwrap().expect("能按 id 读回");
+    assert_eq!(fetched.url, "https://example.com/a");
+    assert_eq!(fetched.site, "example.com");
+    assert_eq!(fetched.lang, "zh-Hans");
+    assert_eq!(fetched.excerpt, "摘要");
+    assert_eq!(fetched.content_key, "web-0123456789abcdef");
+
+    assert_eq!(
+        store.bookmark_id_by_url("https://example.com/a").unwrap(),
+        Some(older)
+    );
+    assert!(
+        store
+            .bookmark_id_by_url("https://example.com/missing")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn rebooking_the_same_url_refreshes_content_but_keeps_id_and_time() {
+    let mut store = store();
+    let first = store
+        .put_bookmark(&bookmark("https://example.com/a", "旧标题", 1_000))
+        .unwrap();
+
+    let mut updated = bookmark("https://example.com/a", "新标题", 9_999);
+    updated.excerpt = "新摘要".to_string();
+    updated.image_count = 7;
+    let second = store.put_bookmark(&updated).unwrap();
+
+    assert_eq!(first, second, "同一个 URL 只有一行");
+    assert_eq!(store.bookmark_count().unwrap(), 1);
+    let row = store.get_bookmark(first).unwrap().unwrap();
+    assert_eq!(row.title, "新标题");
+    assert_eq!(row.excerpt, "新摘要");
+    assert_eq!(row.image_count, 7);
+    assert_eq!(row.created_at, 1_000, "首次收藏时间保持不变");
+}
+
+#[test]
+fn deleting_a_bookmark_removes_only_that_row() {
+    let mut store = store();
+    let a = store
+        .put_bookmark(&bookmark("https://example.com/a", "A", 1_000))
+        .unwrap();
+    let b = store
+        .put_bookmark(&bookmark("https://example.com/b", "B", 2_000))
+        .unwrap();
+    store.put_body("web-0123456789abcdef", "{}").unwrap();
+
+    let removed = store.delete_bookmark(a).unwrap().expect("返回被删的行");
+    assert_eq!(removed.id, a);
+    assert!(store.get_bookmark(a).unwrap().is_none());
+    assert_eq!(store.list_bookmarks().unwrap().len(), 1);
+    assert_eq!(store.list_bookmarks().unwrap()[0].id, b);
+
+    assert!(store.delete_body("web-0123456789abcdef").unwrap());
+    assert!(store.get_body("web-0123456789abcdef").unwrap().is_none());
+    assert!(store.delete_body("web-missing").is_ok());
+}
+
+#[test]
+fn bookmarks_survive_reopen_and_logout() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bookmarks.db");
+    {
+        let mut store = Store::open(&path).unwrap();
+        store
+            .put_bookmark(&bookmark("https://example.com/a", "A", 1_000))
+            .unwrap();
+        // 收藏是用户自己的资料，不属于同步行：登出不应清空。
+        store.clear_account().unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.bookmark_count().unwrap(), 1);
+    assert_eq!(store.list_bookmarks().unwrap()[0].title, "A");
+}
+
+#[test]
+fn markdown_documents_round_trip_and_survive_logout() {
+    let mut store = store();
+    assert_eq!(store.document_count().unwrap(), 0);
+    assert!(store.get_document("web-abc").unwrap().is_none());
+
+    store
+        .put_document("web-abc", "# 标题\n\n正文。", "zh-Hans")
+        .unwrap();
+    let document = store.get_document("web-abc").unwrap().expect("能读回");
+    assert_eq!(document.content_key, "web-abc");
+    assert_eq!(document.markdown, "# 标题\n\n正文。");
+    assert_eq!(document.lang, "zh-Hans");
+    assert_eq!(store.document_count().unwrap(), 1);
+
+    // 覆盖写：重新收藏同一个 URL 时正文会更新。
+    store.put_document("web-abc", "新正文", "zh-Hans").unwrap();
+    assert_eq!(
+        store.get_document("web-abc").unwrap().unwrap().markdown,
+        "新正文"
+    );
+
+    // 收藏是本地资料：登出清同步行，但不清 Markdown 正文。
+    store.clear_account().unwrap();
+    assert!(
+        store.get_document("web-abc").unwrap().is_some(),
+        "登出保留收藏的 Markdown"
+    );
+
+    assert!(store.delete_document("web-abc").unwrap());
+    assert!(store.get_document("web-abc").unwrap().is_none());
+    assert!(!store.delete_document("web-abc").unwrap());
+}

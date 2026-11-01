@@ -12,8 +12,10 @@
 
 pub mod api;
 pub mod http;
+pub mod markdown;
 pub mod mock;
 pub mod model;
+pub mod webpage;
 
 pub use api::{
     ChapterRequest, ContentApi, ContentApiBackend, content_api_from_env, http_content_api,

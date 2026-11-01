@@ -13,13 +13,15 @@ use std::sync::Arc;
 use tela_content::api::ContentApi;
 
 use crate::account::AccountService;
-use crate::shell::{OfflineCacheService, RecommendationService, ShellData};
+use crate::shell::{BookmarkService, OfflineCacheService, RecommendationService, ShellData};
 
 use gpui_kit::base::v_flex;
 use gpui_kit::*;
 
+pub mod bookmark;
 pub mod reader;
 pub mod shell;
+pub use bookmark::BookmarkDialogView;
 pub use reader::ReaderView;
 pub use shell::ShellView;
 
@@ -36,6 +38,7 @@ pub struct GuiApp {
     accounts: Option<Arc<dyn AccountService>>,
     offline_cache: Option<Arc<dyn OfflineCacheService>>,
     recommendations: Option<Arc<dyn RecommendationService>>,
+    bookmarks: Option<Arc<dyn BookmarkService>>,
 }
 
 impl GuiApp {
@@ -47,6 +50,7 @@ impl GuiApp {
             accounts: None,
             offline_cache: None,
             recommendations: None,
+            bookmarks: None,
         }
     }
 
@@ -62,6 +66,7 @@ impl GuiApp {
             accounts: Some(accounts),
             offline_cache: None,
             recommendations: None,
+            bookmarks: None,
         }
     }
 
@@ -74,6 +79,12 @@ impl GuiApp {
     /// 装配推荐写能力（阅读面板的“推荐”按钮与“我的推荐”列表）。
     pub fn with_recommendations(mut self, recommendations: Arc<dyn RecommendationService>) -> Self {
         self.recommendations = Some(recommendations);
+        self
+    }
+
+    /// 装配网页收藏能力（`Shift+B` 弹窗与“我的收藏”列表）。
+    pub fn with_bookmarks(mut self, bookmarks: Arc<dyn BookmarkService>) -> Self {
+        self.bookmarks = Some(bookmarks);
         self
     }
 }
@@ -162,6 +173,7 @@ pub fn run(app: GuiApp) {
     let accounts = app.accounts;
     let offline_cache = app.offline_cache;
     let recommendations = app.recommendations;
+    let bookmarks = app.bookmarks;
     gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
         cx.on_window_closed(|cx, _| {
@@ -172,12 +184,13 @@ pub fn run(app: GuiApp) {
         .detach();
         gpui_kit::open_window(window_options(cx), cx, move |_, cx| {
             cx.new(|cx| {
-                ShellView::new_with_recommendations(
+                ShellView::new_with_bookmarks(
                     data.clone(),
                     content.clone(),
                     accounts.clone(),
                     offline_cache.clone(),
                     recommendations.clone(),
+                    bookmarks.clone(),
                     cx,
                 )
             })

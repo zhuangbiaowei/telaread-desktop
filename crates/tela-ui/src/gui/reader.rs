@@ -92,6 +92,10 @@ pub struct ReaderView {
     content: Arc<dyn ContentApi>,
     session: ReaderSession,
     article_id: Option<i64>,
+    /// 当前阅读的本地网页收藏 id（与 `article_id` 互斥）。
+    bookmark_id: Option<i64>,
+    /// 打开收藏之前的视图模式：收藏固定用原文视图，回到文章时恢复用户原来的选择。
+    mode_before_bookmark: Option<ViewMode>,
     title: Option<String>,
     /// 原文地址；用于标题旁的“打开原文”，为空时不显示入口。
     article_url: Option<String>,
@@ -154,6 +158,8 @@ impl ReaderView {
             content,
             session,
             article_id: None,
+            bookmark_id: None,
+            mode_before_bookmark: None,
             title: None,
             article_url: None,
             generation: 0,
@@ -186,6 +192,16 @@ impl ReaderView {
     /// 当前文章 id。
     pub fn article_id(&self) -> Option<i64> {
         self.article_id
+    }
+
+    /// 当前阅读的收藏 id（读本地网页时非空）。
+    pub fn bookmark_id(&self) -> Option<i64> {
+        self.bookmark_id
+    }
+
+    /// 当前是否有正文可选择（文章与本地收藏共用阅读面板）。
+    fn has_selection(&self) -> bool {
+        self.article_id.is_some() || self.bookmark_id.is_some()
     }
 
     /// 当前文章的原文地址（测试/诊断用）。
@@ -245,12 +261,58 @@ impl ReaderView {
         cx: &mut Context<Self>,
     ) {
         // 同一篇且当前不是失败态：不重复请求。失败态下再点一次等于重试。
-        if self.article_id == Some(article_id) && !self.session.state().is_failed() {
+        if self.article_id == Some(article_id)
+            && self.bookmark_id.is_none()
+            && !self.session.state().is_failed()
+        {
             self.title = Some(title);
             self.article_url = url;
             return;
         }
-        self.article_id = Some(article_id);
+        self.begin_select(Some(article_id), None, title, url, cx);
+    }
+
+    /// 选中一条本地网页收藏（正文在本地库，没有远端译文）。
+    pub fn select_bookmark(
+        &mut self,
+        bookmark_id: i64,
+        title: String,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.bookmark_id == Some(bookmark_id)
+            && self.article_id.is_none()
+            && !self.session.state().is_failed()
+        {
+            self.title = Some(title);
+            self.article_url = url;
+            return;
+        }
+        self.begin_select(None, Some(bookmark_id), title, url, cx);
+    }
+
+    /// 换一篇正文（文章或收藏），重置提示、滚动位置与推荐状态，然后后台取数。
+    fn begin_select(
+        &mut self,
+        article_id: Option<i64>,
+        bookmark_id: Option<i64>,
+        title: String,
+        url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // 收藏没有译文，固定原文视图；回到文章时恢复进入收藏前的视图模式。
+        if article_id.is_some()
+            && self.bookmark_id.is_some()
+            && let Some(mode) = self.mode_before_bookmark.take()
+        {
+            self.session.set_mode(mode);
+        }
+        if bookmark_id.is_some() && self.bookmark_id.is_none() {
+            self.mode_before_bookmark = Some(self.session.mode());
+            self.session.set_mode(ViewMode::Original);
+        }
+        self.article_id = article_id;
+        self.bookmark_id = bookmark_id;
         self.title = Some(title);
         self.article_url = url;
         self.translation_notice = None;
@@ -258,13 +320,24 @@ impl ReaderView {
         self.recommend_dialog = None;
         self.recommend_error = None;
         self.recommend_notice = None;
-        self.reload_recommendation();
         self.translation_task = None;
         self.scroll_handle.set_offset(Point {
             x: px(0.),
             y: px(0.),
         });
-        match self.data.chapter_request(article_id) {
+        if article_id.is_some() {
+            self.reload_recommendation();
+        } else {
+            self.recommendation = None;
+        }
+        let request = match bookmark_id {
+            Some(bookmark_id) => self.data.bookmark_request(bookmark_id),
+            None => match article_id {
+                Some(article_id) => self.data.chapter_request(article_id),
+                None => return,
+            },
+        };
+        match request {
             Ok(request) => {
                 self.session.reset_to(request);
                 self.rebuild_rendered_rows();
@@ -279,11 +352,57 @@ impl ReaderView {
         }
     }
 
+    /// 清空当前阅读（例如正在读的收藏被移除）。
+    ///
+    /// 只清选中项与渲染缓存，并递增 generation 让在途请求的结果失效；
+    /// 阅读面板随即回到“选择一篇文章开始阅读”的空态。
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.generation = self.generation.wrapping_add(1);
+        self.article_id = None;
+        self.bookmark_id = None;
+        self.mode_before_bookmark = None;
+        self.title = None;
+        self.article_url = None;
+        self.recommendation = None;
+        self.recommend_dialog = None;
+        self.recommend_error = None;
+        self.recommend_notice = None;
+        self.translation_notice = None;
+        self.link_notice = None;
+        self.translation_task = None;
+        self.task = None;
+        self.rendered_rows.clear();
+        let lang = self.session.request().lang.clone();
+        self.session
+            .reset_to(ChapterRequest::new(String::new(), lang));
+        cx.notify();
+    }
+
     /// 重试当前文章（后台取数）。
     ///
     /// 如果上次连 `chapter_request` 都失败了（request 为空），重试会先重新解析
     /// 文章 → 正文 key；这样“服务端还没就绪”之类的暂时性错误恢复后无需重新选文章。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if let Some(bookmark_id) = self.bookmark_id {
+            if self.session.request().content_key.is_empty() {
+                match self.data.bookmark_request(bookmark_id) {
+                    Ok(request) => self.session.reset_to(request),
+                    Err(error) => {
+                        self.session.mark_retry();
+                        self.session.apply_load_result(Err(error));
+                        self.rebuild_rendered_rows();
+                        cx.notify();
+                        return;
+                    }
+                }
+            }
+            self.session.mark_retry();
+            self.session.begin_load();
+            self.rebuild_rendered_rows();
+            self.spawn_load(cx);
+            cx.notify();
+            return;
+        }
         let Some(article_id) = self.article_id else {
             return;
         };
@@ -849,7 +968,7 @@ impl ReaderView {
     }
 
     fn header(&self, cx: &mut Context<Self>) -> Div {
-        if self.article_id.is_none() {
+        if !self.has_selection() {
             return v_flex()
                 .w_full()
                 .gap_1()
@@ -872,15 +991,26 @@ impl ReaderView {
         }
 
         let title = self.title.clone().unwrap_or_else(|| "阅读".to_string());
-        let status = self.session.state().status_label();
         let total_paragraphs = self.session.total_paragraphs();
         // 正文一次渲染整篇，顶部不再出现页码：只留译文状态与段落总数。
-        let status_line = if total_paragraphs > 0 {
-            format!("{status} · 共 {total_paragraphs} 段")
+        // 收藏的网页没有译文（本地抽取的正文就是原文），改为展示“收藏的网页”。
+        let status_line = if self.bookmark_id.is_some() {
+            let state = self.session.state().status_label();
+            if total_paragraphs > 0 && self.session.state().is_ready() {
+                format!("收藏的网页 · 共 {total_paragraphs} 段")
+            } else {
+                state
+            }
         } else {
-            status
+            let status = self.session.state().status_label();
+            if total_paragraphs > 0 {
+                format!("{status} · 共 {total_paragraphs} 段")
+            } else {
+                status
+            }
         };
         let mode = self.session.mode();
+        let is_bookmark = self.bookmark_id.is_some();
 
         let mut modes = Vec::new();
         for option in ViewMode::ALL {
@@ -984,13 +1114,23 @@ impl ReaderView {
                                 element.child(div().text_xs().text_color(rgb(DANGER)).child(notice))
                             }),
                     )
-                    .child(h_flex().items_center().gap_1().children(modes)),
+                    // 收藏的网页没有译文：不显示 o/c/t 视图切换，避免出现两列相同内容。
+                    .child(h_flex().items_center().gap_1().children(if is_bookmark {
+                        Vec::new()
+                    } else {
+                        modes
+                    })),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(rgb(MUTED))
-                    .child("o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · ↑/↓ 逐行 · PgUp/PgDn 滚动"),
+                    .child(if is_bookmark {
+                        "Shift+B 继续收藏 · j/k 文章 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                    } else {
+                        "o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · Shift+B 收藏网址 · \
+                         ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                    }),
             )
     }
 
@@ -1030,7 +1170,7 @@ impl ReaderView {
     }
 
     fn body(&self, cx: &mut Context<Self>) -> Div {
-        if self.article_id.is_none() {
+        if !self.has_selection() {
             return self.centered_note("选择一篇文章开始阅读", "左侧选订阅，中间选文章。");
         }
         match self.session.state() {
@@ -1095,8 +1235,17 @@ impl ReaderView {
         let Some(doc) = self.session.state().document() else {
             return div().w_full();
         };
-        let original = format!("原文 · {}", language_label(&doc.source_lang));
-        let translated = format!("译文 · {}", language_label(&doc.lang));
+        // 本地收藏的网页可能没有声明语言：只显示「原文」，不留一个空的「· 」。
+        let original = if doc.source_lang.trim().is_empty() {
+            "原文".to_string()
+        } else {
+            format!("原文 · {}", language_label(&doc.source_lang))
+        };
+        let translated = if doc.lang.trim().is_empty() {
+            "译文".to_string()
+        } else {
+            format!("译文 · {}", language_label(&doc.lang))
+        };
 
         let label = |text: String| div().text_xs().text_color(rgb(MUTED)).child(text);
 

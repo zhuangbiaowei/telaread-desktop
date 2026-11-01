@@ -15,10 +15,14 @@
 //!
 //! ## 版本
 //!
-//! [`LATEST_SCHEMA_VERSION`] = 2。v1 是旧 mock 协议（行带 `seq`、游标是整数），
+//! [`LATEST_SCHEMA_VERSION`] = 6。v1 是旧 mock 协议（行带 `seq`、游标是整数），
 //! 迁移时丢弃其行数据并在 README 说明；真实 API 的数据从登录后的第一次快照开始。
+//! v3–v6 只补表（译本缓存、图片缓存、本地网页收藏、Markdown 正文），升级不丢数据。
 
 mod schema;
 mod store;
 
-pub use store::{ApplyOutcome, LATEST_SCHEMA_VERSION, PROFILE_ROW_KEY, Store, StoredRow};
+pub use store::{
+    ApplyOutcome, BookmarkInput, BookmarkRow, CachedDocument, CachedTranslation,
+    LATEST_SCHEMA_VERSION, PROFILE_ROW_KEY, Store, StoredRow,
+};

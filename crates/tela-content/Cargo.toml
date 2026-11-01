@@ -15,3 +15,11 @@ tela-net.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 urlencoding.workspace = true
+# 网页收藏（`webpage` 模块）：抓取任意 URL 并抽取正文。
+# 与 tela-net 一样走阻塞调用（GUI 把调用放到后台线程），不依赖系统 OpenSSL。
+reqwest.workspace = true
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+dom_smoothie.workspace = true
+htmd.workspace = true
+pulldown-cmark.workspace = true

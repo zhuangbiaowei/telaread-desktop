@@ -166,7 +166,10 @@ tela-app ──▶ tela-ui ──▶ tela-content ──▶ tela-proto
 | 错误 | `thiserror`（库）+ `anyhow`（应用层） | 边界清晰 | — |
 | i18n | `rust-i18n` | gpui-kit 官方配套 | `fluent`（更重） |
 | 字体 | 系统字体 + 打包拉丁字体 | 控制体积与许可 | 打包 Noto CJK（~20MB/字重） |
-| HTML 解析 | `scraper`（内部 html5ever + ego-tree） | 与 gpui-base 同源、容错好；能拿到元素/文本/属性，够渲染用 | `html5ever` + 自写 TreeSink（更底层） |
+| HTML 解析（本地清洗） | `html5ever` + `markup5ever_rcdom` | 与 GPUI 依赖图里的解析栈同源、容错好；`tela-content/src/webpage.rs` 的清洗/分块只需标签/属性/文本/后代遍历，手写比引入 selector 引擎更可控 | `scraper`（html5ever + ego-tree） |
+| 网页正文抽取 | `dom_smoothie`（Readability.js 的 Rust 移植） | 通用网页的正文/标题/站点/语言识别比启发式规则稳；收藏网页以它为主路径，站点特例仍可覆盖 | 纯启发式（当前 fallback） |
+| HTML→Markdown | `htmd`（turndown.js 的 Rust 移植） | 图片、表格、列表、代码块都能正确转 Markdown；依赖少 | 自己写序列化 |
+| Markdown→HTML | `pulldown-cmark` | 成熟、快，阅读面板直接复用现有块渲染 | — |
 | 图片解码 | `image`（png/jpeg/webp） | 纯 Rust，够用 | `zune-image`（更快，生态小） |
 | 本地搜索 | SQLite FTS5 | 零额外依赖 | `tantivy`（重） |
 | 更新 | `self_update`（便携）/ 平台安装器 | gpui-kit 官方文档推荐 | 自建更新服务 |
@@ -195,7 +198,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 tracing = "0.1"
 im = "15"                   # 持久化 Map，便于快照克隆
 keyring = "4"               # 系统钥匙串
-scraper = "0.29"           # html5ever + ego-tree，解析块 HTML
+html5ever = "0.27"          # 网页收藏：解析 HTML5
+markup5ever_rcdom = "0.3"   # …并在 rcdom 树上抽取正文块
+dom_smoothie = "0.19"       # 网页正文抽取（Readability.js 移植）
+htmd = "0.5"                # HTML → Markdown（turndown.js 移植）
+pulldown-cmark = "0.13"     # Markdown → HTML（阅读面板复用块渲染）
 image = "0.25"
 uuid = { version = "1", features = ["v7"] }
 thiserror = "2"
@@ -865,7 +872,7 @@ pub fn selected_source_range(&self) -> Option<Range<usize>> {
 
 **M2 目标方案**：
 
-- `tela-content` 用 `scraper`（html5ever）解析每个块的 HTML，产出 `ParsedBlock`：
+- `tela-content` 用 `html5ever`（+ `markup5ever_rcdom`）解析每个块的 HTML，产出 `ParsedBlock`：
   - 文本 run（带样式：粗体/斜体/代码/链接）；
   - 叶子节点（`data-tb`）与字符区间；
   - 图片、列表、引用、表格等块级结构；
