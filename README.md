@@ -202,9 +202,13 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 正文图片同时识别 `data-src` / `data-original` / `data-lazy-src` 等懒加载属性
   （微信、知乎等站点的正文图片走这些属性）；`display:none` / `hidden` 的不可见节点整棵跳过
   （微信小标题两侧的 `unset` 标记就是这样藏起来的，不会再出现在正文里）。
-- **X（Twitter）帖子**按帖子结构抽取：从页面 SSR 数据里取长推文全文（`note_tweet`），
-  标题用正文第一行（过长截断），正文按空行分段；引用帖作为引用块附在后面，
-  不会混入「Post / Log in / Sign up」这类界面文字，也不会把「作者 on X」当标题。
+- **X（Twitter）帖子与长文章**按站点结构抽取：从页面 SSR 数据里取长推文全文
+  （`note_tweet`）或文章正文（`article_results.result.content_state` 的 Draft.js 块），
+  帖子标题用正文第一行（过长截断），文章标题用文章自己的标题；正文保留段落、小标题、
+  列表、链接、粗体等样式与正文图片，引用帖作为引用块附在后面。不会混入
+  「Post / Log in / Sign up」这类界面文字，也不会把「作者 on X」当标题。
+  x.com 的帖子地址（`/<user>/status/<id>`）和文章地址（`/<user>/article/<id>`）都支持；
+  `t.co` 文章短链对匿名客户端会跳到登录页，客户端会提示改用文章页或帖子页地址。
 - 收藏的网页没有译文，阅读面板只显示原文，不出现 `原文 | 对照 | 译文` 切换；
   标题旁的 `↗` 仍然打开原网址。
 

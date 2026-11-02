@@ -24,15 +24,18 @@
 //!   [`TelaError::Blocked`]（提示用户去浏览器完成验证），**不保存空文章**。
 //! - 懒加载图片（`data-src` / `data-original` / `data-lazy-src`）与微信图片都会取
 //!   真实地址，`data:` 占位图被跳过。
-//! - **X（Twitter）帖子**是 React 应用：通用抽取只能拿到导航、登录按钮和「作者 on X」
-//!   这种标题。帖子的 SSR 数据里带着完整长文（`note_tweet`），`x_post_from_html`
-//!   直接从脚本里的 JSON 取「作者 + 全文」，标题用正文第一行，正文按空行分段。
+//! - **X（Twitter）帖子与长文章**是 React 应用：通用抽取只能拿到导航、登录按钮和
+//!   「作者 on X」这种标题。SSR 数据里带着帖子全文（`note_tweet`）或文章正文
+//!   （`article_results.result.content_state`，Draft.js 块结构），`x_post_from_html`
+//!   直接从脚本里的 JSON 取「作者 + 正文」：帖子的标题用正文第一行，正文按空行分段；
+//!   长文章用文章标题，正文按块还原段落、小标题、列表、链接、粗体等样式与图片。
 //! - `display:none` / `hidden` 的节点整棵跳过：微信小标题两侧的 `unset` 标记就是
 //!   这样藏起来的，之前会被当成正文文字。
 //! - 正文最终转成 **Markdown**（`dom_smoothie` 抽正文 → 本地清洗成块 → `htmd` 转
 //!   Markdown），图片保留原始绝对地址并单独下载缓存；阅读面板再把 Markdown 渲染回
 //!   HTML 块显示（见 [`crate::markdown`]）。
 
+use std::collections::HashMap;
 use std::io::Read;
 use std::rc::Rc;
 use std::time::Duration;
@@ -229,13 +232,25 @@ pub fn fetch(raw_url: &str) -> Result<WebPage, TelaError> {
 
     let html = read_text(response, MAX_PAGE_BYTES)?;
 
-    // X/Twitter 帖子：通用抽取会拿到导航/登录按钮/作者名，优先按帖子结构抽全文。
-    let is_x_post = is_x_status_url(&final_url) || is_x_status_url(&url);
+    // X/Twitter 帖子与长文章：通用抽取会拿到导航/登录按钮/作者名，优先按 SSR 结构抽全文。
+    let is_x_post = is_x_post_url(&final_url) || is_x_post_url(&url);
     if is_x_post && let Some(page) = x_post_from_html(&final_url, &html) {
         return Ok(page);
     }
+    // t.co 短链（以及直接粘贴的 /i/article/<id>）对匿名客户端会被重定向到登录页；
+    // 这不是一条可收藏的正文，明确告诉用户改用什么地址，而不是把登录页存成收藏。
+    if let Some(detail) = x_login_gate_detail(&final_url) {
+        return Err(TelaError::Blocked { url, detail });
+    }
 
-    let page = parse_html(&final_url, &html);
+    let mut page = parse_html(&final_url, &html);
+    if is_x_post {
+        // 文章卡的 SSR 有时只有标题/摘要，正文仍来自页面 DOM（通用抽取）。
+        if let Some(title) = x_article_title(&html, &final_url) {
+            page.title = title;
+        }
+        page.site = "X".to_string();
+    }
     if let Some(detail) = challenge_detail(&final_url, &html, page.chars) {
         return Err(TelaError::Blocked {
             // 给用户看的是他们提交的地址（不是带一次性 token 的验证页地址）。
@@ -567,20 +582,30 @@ fn parse_document(html: &str) -> Handle {
 }
 
 // ---------------------------------------------------------------------------
-// X（Twitter）帖子
+// X（Twitter）帖子与长文章
 // ---------------------------------------------------------------------------
 
 /// 是否是 X（Twitter）的帖子地址：`/<user>/status/<id>`。
 pub fn is_x_status_url(url: &str) -> bool {
+    x_path_has_kind(url, "status")
+}
+
+/// 是否是 X 的长文章地址：`/<user>/article/<id>`（以及分享短链落到的 `/i/article/<id>`）。
+pub fn is_x_article_url(url: &str) -> bool {
+    x_path_has_kind(url, "article")
+}
+
+/// 是否是 X 的帖子或长文章地址（正文都在 SSR 数据里，走专门的解析）。
+pub fn is_x_post_url(url: &str) -> bool {
+    is_x_status_url(url) || is_x_article_url(url)
+}
+
+/// 路径第二段是否是 `kind`（`/<user>/<kind>/<id>`）。
+fn x_path_has_kind(url: &str, kind: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };
-    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
-    let host = host
-        .strip_prefix("www.")
-        .or_else(|| host.strip_prefix("mobile."))
-        .unwrap_or(&host);
-    if host != "x.com" && host != "twitter.com" {
+    if !is_x_host(parsed.host_str().unwrap_or("")) {
         return false;
     }
     let segments: Vec<&str> = parsed
@@ -588,18 +613,196 @@ pub fn is_x_status_url(url: &str) -> bool {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect();
-    segments.len() >= 3 && segments[1] == "status" && !segments[0].is_empty()
+    segments.len() >= 3 && segments[1] == kind && !segments[0].is_empty()
 }
 
-/// 从 X 帖子页的 SSR 数据里抽出一篇可读的「文章」。
+/// X / Twitter 的主机名（`www.`、`mobile.` 前缀不算站点差异）。
+fn is_x_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    let host = host
+        .strip_prefix("www.")
+        .or_else(|| host.strip_prefix("mobile."))
+        .unwrap_or(&host);
+    host == "x.com" || host == "twitter.com"
+}
+
+/// t.co 短链与 `/i/article/<id>` 对匿名客户端会被重定向到登录页；给出可操作的说明。
 ///
-/// 帖子页的正文（尤其是长推文）不在可见 DOM 里，而是在脚本中的 GraphQL 结果
-/// `tweet_result_by_rest_id` 里；这里解析出「作者 + 全文（`note_tweet`）」，
-/// 标题取正文第一行，正文按空行分段。
+/// 公开的帖子页（`/<user>/status/<id>`）与文章页（`/<user>/article/<id>`）不需要登录，
+/// 只是分享短链落到的内部文章 id 需要会话才能展开成公开地址。
+fn x_login_gate_detail(final_url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(final_url).ok()?;
+    if !is_x_host(parsed.host_str().unwrap_or("")) {
+        return None;
+    }
+    let path = parsed.path().to_ascii_lowercase();
+    if !(path.contains("onboarding") || path.contains("login") || path.contains("flow")) {
+        return None;
+    }
+    let lower = final_url.to_ascii_lowercase();
+    if !(lower.contains("%2fi%2farticle%2f") || lower.contains("/i/article/")) {
+        return None;
+    }
+    Some(
+        "这个 X 文章短链要求登录后才能展开，请改用文章页（/<user>/article/<id>）\
+         或帖子页（/<user>/status/<id>）地址"
+            .to_string(),
+    )
+}
+
+/// 从 X 页面的 SSR 数据里抽出一篇可读的「文章」。
+///
+/// 长文章正文在 `result.article.article_results.result.content_state`（Draft.js 块结构），
+/// 长推文正文在 `note_tweet`。两者都从脚本里的 GraphQL 结果 `tweet_result_by_rest_id`
+/// 取；同一页可能出现多份（文章卡只有标题/摘要，完整帖子才有正文），取信息最全的一份。
 fn x_post_from_html(url: &str, html: &str) -> Option<WebPage> {
-    let root = x_tweet_result(html)?;
+    let root = x_tweet_result(html, url)?;
     // `tweet_result_by_rest_id` 外面还包了一层 `{id, rest_id, result}`。
     let tweet = root.get("result").unwrap_or(&root);
+    if let Some(page) = x_article_from_tweet(url, tweet) {
+        return Some(page);
+    }
+    x_post_text_from_tweet(url, tweet)
+}
+
+/// 长文章：标题、作者、Draft.js 块（段落/小标题/列表/链接/样式/图片）。
+fn x_article_from_tweet(url: &str, tweet: &serde_json::Value) -> Option<WebPage> {
+    let article = tweet.pointer("/article/article_results/result")?;
+    let content_state = article.get("content_state")?;
+    let blocks_json = content_state.get("blocks")?.as_array()?;
+    if blocks_json.is_empty() {
+        return None;
+    }
+
+    let entities = x_entities(content_state);
+    let media_urls = x_article_media_urls(article);
+    let base = reqwest::Url::parse(url).ok();
+    let mut blocks = Vec::new();
+    let mut images = Vec::new();
+
+    let author = x_user_field(tweet, "name").unwrap_or_default();
+    let screen_name = x_user_field(tweet, "screen_name").unwrap_or_default();
+    push_x_author(&mut blocks, &author, &screen_name);
+
+    let mut list: Option<(&'static str, Vec<String>)> = None;
+    for block_value in blocks_json {
+        let block_type = block_value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("unstyled");
+        let text = block_value
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        match block_type {
+            // 图片等媒体在 Draft.js 里是 `atomic` 块，真正的地址在 entity_map 里。
+            "atomic" => {
+                flush_x_list(&mut list, &mut blocks);
+                let Some(entity) = x_block_entity(block_value, &entities) else {
+                    continue;
+                };
+                if entity.kind != "MEDIA" {
+                    continue;
+                }
+                for media_id in &entity.media_ids {
+                    let Some(src) = media_urls.get(media_id) else {
+                        continue;
+                    };
+                    if !images.iter().any(|item| item == src) {
+                        images.push(src.clone());
+                    }
+                    blocks.push(block(
+                        "figure",
+                        format!("<p><img src=\"{}\" alt=\"图片\"></p>", escape_html(src)),
+                    ));
+                }
+            }
+            "unordered-list-item" | "ordered-list-item" => {
+                let tag = if block_type == "ordered-list-item" {
+                    "ol"
+                } else {
+                    "ul"
+                };
+                if list.as_ref().is_none_or(|(kind, _)| *kind != tag) {
+                    flush_x_list(&mut list, &mut blocks);
+                    list = Some((tag, Vec::new()));
+                }
+                let inner = render_x_inline(text, block_value, &entities, base.as_ref());
+                let inner = inner.trim();
+                if !inner.is_empty()
+                    && let Some((_, items)) = list.as_mut()
+                {
+                    items.push(format!("<li>{inner}</li>"));
+                }
+            }
+            _ => {
+                flush_x_list(&mut list, &mut blocks);
+                match block_type {
+                    "code-block" | "code" => {
+                        if !text.trim().is_empty() {
+                            blocks.push(block(
+                                "pre",
+                                format!("<pre><code>{}</code></pre>", escape_html(text)),
+                            ));
+                        }
+                    }
+                    _ => {
+                        let tag = match block_type {
+                            "header-one" => "h1",
+                            "header-two" => "h2",
+                            "header-three" => "h3",
+                            "blockquote" => "blockquote",
+                            _ => "p",
+                        };
+                        let inner = render_x_inline(text, block_value, &entities, base.as_ref());
+                        let inner = inner.trim();
+                        if !inner.is_empty() {
+                            blocks.push(block(tag, format!("<{tag}>{inner}</{tag}>")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    flush_x_list(&mut list, &mut blocks);
+
+    let title = article
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(collapse_whitespace)
+        .filter(|title| !title.is_empty())
+        .or_else(|| {
+            article
+                .get("plain_text")
+                .and_then(|value| value.as_str())
+                .and_then(smart_title_from_text)
+        })
+        .unwrap_or_else(|| "X 文章".to_string());
+
+    let html = blocks_to_html(&blocks);
+    let markdown = html_to_markdown(&html, base.as_ref());
+    let (chars, words, excerpt) = stats_from_blocks(&blocks);
+    let lang = tweet
+        .pointer("/legacy/lang")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(WebPage {
+        url: url.to_string(),
+        title,
+        site: "X".to_string(),
+        lang,
+        excerpt,
+        markdown,
+        images,
+        chars,
+        words,
+    })
+}
+
+/// 长推文：标题取正文第一行，正文按空行分段，引用帖作为引用块附在后面。
+fn x_post_text_from_tweet(url: &str, tweet: &serde_json::Value) -> Option<WebPage> {
     let text = x_tweet_text(tweet)?;
     let text = text.trim();
     if text.is_empty() {
@@ -615,14 +818,7 @@ fn x_post_from_html(url: &str, html: &str) -> Option<WebPage> {
         .to_string();
 
     let mut blocks = Vec::new();
-    if !author.is_empty() {
-        let label = if screen_name.is_empty() {
-            author.clone()
-        } else {
-            format!("{author}（@{screen_name}）")
-        };
-        blocks.push(block("p", format!("<p>{}</p>", escape_html(&label))));
-    }
+    push_x_author(&mut blocks, &author, &screen_name);
     for paragraph in split_paragraphs(text) {
         blocks.push(block("p", format!("<p>{}</p>", escape_html(&paragraph))));
     }
@@ -680,17 +876,416 @@ fn x_post_from_html(url: &str, html: &str) -> Option<WebPage> {
     })
 }
 
+/// 作者行（正文第一段）。
+fn push_x_author(blocks: &mut Vec<ContentBlock>, author: &str, screen_name: &str) {
+    if author.is_empty() {
+        return;
+    }
+    let label = if screen_name.is_empty() {
+        author.to_string()
+    } else {
+        format!("{author}（@{screen_name}）")
+    };
+    blocks.push(block("p", format!("<p>{}</p>", escape_html(&label))));
+}
+
+/// 把连续的列表项合并成一个 `<ul>` / `<ol>` 块。
+fn flush_x_list(list: &mut Option<(&'static str, Vec<String>)>, blocks: &mut Vec<ContentBlock>) {
+    if let Some((tag, items)) = list.take()
+        && !items.is_empty()
+    {
+        blocks.push(block(tag, format!("<{tag}>{}</{tag}>", items.join(""))));
+    }
+}
+
 /// 取 SSR 脚本里的 `tweet_result_by_rest_id` 对象。
-fn x_tweet_result(html: &str) -> Option<serde_json::Value> {
-    let marker = html.find("tweet_result_by_rest_id")?;
-    let script_start = html[..marker].rfind("<script")?;
-    let script_end = html[marker..].find("</script>")? + marker;
-    let unescaped = js_unescape(html.get(script_start..script_end)?);
-    // 数据在 JS 字符串里：`value:"{"data":{"tweet_result_by_rest_id":{…}}}"`。
-    let key = "\"tweet_result_by_rest_id\":{";
-    let key_pos = unescaped.find(key)?;
-    let object = json_object_slice(&unescaped, key_pos + key.len() - 1)?;
-    serde_json::from_str(object).ok()
+///
+/// 同页多份时先按 URL 里的帖子/文章 id 过滤（时间线、回复里可能混进别的文章），
+/// 再取信息最全的一份。
+fn x_tweet_result(html: &str, url: &str) -> Option<serde_json::Value> {
+    let mut results = x_tweet_results(html);
+    if let Some(target) = x_post_id(url) {
+        let matching: Vec<serde_json::Value> = results
+            .iter()
+            .filter(|root| x_result_rest_id(root).as_deref() == Some(target.as_str()))
+            .cloned()
+            .collect();
+        if !matching.is_empty() {
+            results = matching;
+        }
+    }
+    results.into_iter().max_by_key(x_tweet_score)
+}
+
+/// URL 里的帖子/文章 id（`/<user>/status/<id>`、`/<user>/article/<id>`）。
+fn x_post_id(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !is_x_host(parsed.host_str().unwrap_or("")) {
+        return None;
+    }
+    let segments: Vec<&str> = parsed
+        .path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() >= 3 && matches!(segments[1], "status" | "article") {
+        Some(segments[2].to_string())
+    } else {
+        None
+    }
+}
+
+/// SSR 结果自己的 rest_id（`{id, rest_id, result}` 的外层）。
+fn x_result_rest_id(root: &serde_json::Value) -> Option<String> {
+    root.get("rest_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            root.get("result")
+                .and_then(|result| result.get("rest_id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+}
+
+/// 一份 SSR 结果的可用程度：完整长文章 > 带正文的帖子 > 文章卡/时间线片段。
+fn x_tweet_score(root: &serde_json::Value) -> usize {
+    let tweet = root.get("result").unwrap_or(root);
+    let mut score = 0;
+    if tweet
+        .pointer("/article/article_results/result/content_state")
+        .is_some()
+    {
+        score += 100;
+    }
+    if x_tweet_text(tweet).is_some() {
+        score += 10;
+    }
+    if tweet.get("core").is_some() {
+        score += 1;
+    }
+    score
+}
+
+/// 扫描页面里所有脚本的 `tweet_result_by_rest_id`（数据在 JS 字符串里）。
+fn x_tweet_results(html: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    while let Some(found) = html[cursor..].find("<script") {
+        let script_start = cursor + found;
+        let Some(end_found) = html[script_start..].find("</script>") else {
+            break;
+        };
+        let script_end = script_start + end_found;
+        let script = &html[script_start..script_end];
+        if script.contains("tweet_result_by_rest_id") {
+            let unescaped = js_unescape(script);
+            // 数据在 JS 字符串里：`value:"{"data":{"tweet_result_by_rest_id":{…}}}"`。
+            let key = "\"tweet_result_by_rest_id\":{";
+            let mut position = 0;
+            while let Some(found) = unescaped[position..].find(key) {
+                let key_pos = position + found;
+                if let Some(object) = json_object_slice(&unescaped, key_pos + key.len() - 1)
+                    && let Ok(value) = serde_json::from_str(object)
+                {
+                    out.push(value);
+                }
+                position = key_pos + 1;
+            }
+        }
+        cursor = script_end + "</script>".len();
+    }
+    out
+}
+
+/// 文章卡的标题（状态页的 SSR 里可能只有标题/摘要，没有完整正文）。
+fn x_article_title(html: &str, url: &str) -> Option<String> {
+    let root = x_tweet_result(html, url)?;
+    let tweet = root.get("result").unwrap_or(&root);
+    let title = tweet
+        .pointer("/article/article_results/result/title")?
+        .as_str()?;
+    let title = collapse_whitespace(title);
+    (!title.is_empty()).then_some(title)
+}
+
+/// 长文章的实体表（`entity_map`）：链接地址与媒体 id。
+struct XEntity {
+    kind: String,
+    url: Option<String>,
+    media_ids: Vec<String>,
+}
+
+/// 把 `content_state.entity_map` 变成「key → 实体」的查找表。
+fn x_entities(content_state: &serde_json::Value) -> HashMap<String, XEntity> {
+    let mut out = HashMap::new();
+    let Some(items) = content_state
+        .get("entity_map")
+        .and_then(|value| value.as_array())
+    else {
+        return out;
+    };
+    for item in items {
+        let Some(key) = item.get("key").and_then(x_json_key) else {
+            continue;
+        };
+        let Some(value) = item.get("value") else {
+            continue;
+        };
+        let kind = value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let data = value.get("data");
+        let url = data
+            .and_then(|data| data.get("url"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let media_ids = data
+            .and_then(|data| data.get("media_items"))
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("media_id"))
+                    .filter_map(x_json_key)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.insert(
+            key,
+            XEntity {
+                kind,
+                url,
+                media_ids,
+            },
+        );
+    }
+    out
+}
+
+/// JSON 里的 key / id 可能是字符串，也可能是数字。
+fn x_json_key(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| value.as_i64().map(|id| id.to_string()))
+}
+
+/// `media_id` → 图片地址（`media_entities` 的 `media_info.original_img_url`）。
+fn x_article_media_urls(article: &serde_json::Value) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(items) = article
+        .get("media_entities")
+        .and_then(|value| value.as_array())
+    else {
+        return out;
+    };
+    for item in items {
+        let Some(id) = item.get("media_id").and_then(x_json_key) else {
+            continue;
+        };
+        let Some(info) = item.get("media_info") else {
+            continue;
+        };
+        let url = [
+            "/original_img_url",
+            "/preview_image_url",
+            "/media_url_https",
+            "/url",
+        ]
+        .iter()
+        .find_map(|path| info.pointer(path).and_then(|value| value.as_str()))
+        .map(str::to_string);
+        if let Some(url) = url {
+            out.insert(id, url);
+        }
+    }
+    out
+}
+
+/// `atomic` 块引用的实体（图片）。
+fn x_block_entity<'a>(
+    block: &serde_json::Value,
+    entities: &'a HashMap<String, XEntity>,
+) -> Option<&'a XEntity> {
+    let ranges = block.get("entity_ranges")?.as_array()?;
+    ranges.iter().find_map(|range| {
+        let key = range.get("key")?;
+        entities.get(&x_json_key(key)?)
+    })
+}
+
+/// 一个行内标签（链接 / 粗体 / 斜体 / 删除线 / 下划线 / 代码）。
+#[derive(Clone, PartialEq, Eq)]
+enum XInlineTag {
+    Link(String),
+    Bold,
+    Italic,
+    Strike,
+    Underline,
+    Code,
+}
+
+impl XInlineTag {
+    fn open(&self) -> String {
+        match self {
+            Self::Link(url) => format!("<a href=\"{}\">", escape_html(url)),
+            Self::Bold => "<strong>".to_string(),
+            Self::Italic => "<em>".to_string(),
+            Self::Strike => "<del>".to_string(),
+            Self::Underline => "<u>".to_string(),
+            Self::Code => "<code>".to_string(),
+        }
+    }
+
+    fn close(&self) -> &'static str {
+        match self {
+            Self::Link(_) => "</a>",
+            Self::Bold => "</strong>",
+            Self::Italic => "</em>",
+            Self::Strike => "</del>",
+            Self::Underline => "</u>",
+            Self::Code => "</code>",
+        }
+    }
+}
+
+/// 把 Draft.js 的一段文本按链接实体与行内样式渲染成白名单 HTML。
+fn render_x_inline(
+    text: &str,
+    block: &serde_json::Value,
+    entities: &HashMap<String, XEntity>,
+    base: Option<&reqwest::Url>,
+) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let links = x_link_ranges(block, &chars, entities, base);
+    let styles = x_style_ranges(block, &chars);
+
+    let mut out = String::with_capacity(text.len());
+    let mut open: Vec<XInlineTag> = Vec::new();
+    for (index, ch) in chars.iter().enumerate() {
+        let mut desired = Vec::new();
+        // 链接在最外层：Markdown 里是 `[**文字**](url)`。
+        if let Some((_, _, url)) = links
+            .iter()
+            .find(|(start, end, _)| *start <= index && index < *end)
+        {
+            desired.push(XInlineTag::Link(url.clone()));
+        }
+        desired.extend(
+            styles
+                .iter()
+                .filter(|(start, end, _)| *start <= index && index < *end)
+                .map(|(_, _, tag)| tag.clone()),
+        );
+
+        let common = open
+            .iter()
+            .zip(desired.iter())
+            .take_while(|(left, right)| left == right)
+            .count();
+        for tag in open.drain(common..).rev() {
+            out.push_str(tag.close());
+        }
+        for tag in &desired[common..] {
+            out.push_str(&tag.open());
+            open.push(tag.clone());
+        }
+        out.push_str(&escape_html(&ch.to_string()));
+    }
+    for tag in open.iter().rev() {
+        out.push_str(tag.close());
+    }
+    out
+}
+
+/// 链接实体覆盖的字符范围。
+fn x_link_ranges(
+    block: &serde_json::Value,
+    chars: &[char],
+    entities: &HashMap<String, XEntity>,
+    base: Option<&reqwest::Url>,
+) -> Vec<(usize, usize, String)> {
+    let Some(ranges) = block
+        .get("entity_ranges")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    ranges
+        .iter()
+        .filter_map(|range| {
+            let entity = entities.get(&x_json_key(range.get("key")?)?)?;
+            if entity.kind != "LINK" {
+                return None;
+            }
+            let url = absolute_url(base, entity.url.as_deref()?)?;
+            let (start, end) = x_range_bounds(chars, range)?;
+            Some((start, end, url))
+        })
+        .collect()
+}
+
+/// 行内样式覆盖的字符范围（按固定的嵌套顺序输出）。
+fn x_style_ranges(block: &serde_json::Value, chars: &[char]) -> Vec<(usize, usize, XInlineTag)> {
+    let Some(ranges) = block
+        .get("inline_style_ranges")
+        .and_then(|value| value.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut styles: Vec<(usize, usize, XInlineTag)> = ranges
+        .iter()
+        .filter_map(|range| {
+            let style = range.get("style")?.as_str()?.to_ascii_lowercase();
+            let tag = match style.as_str() {
+                "bold" => XInlineTag::Bold,
+                "italic" => XInlineTag::Italic,
+                "strikethrough" => XInlineTag::Strike,
+                "underline" => XInlineTag::Underline,
+                "code" => XInlineTag::Code,
+                _ => return None,
+            };
+            let (start, end) = x_range_bounds(chars, range)?;
+            Some((start, end, tag))
+        })
+        .collect();
+    // 固定嵌套顺序：粗体 → 斜体 → 删除线 → 下划线 → 代码。
+    styles.sort_by_key(|(_, _, tag)| match tag {
+        XInlineTag::Bold => 0,
+        XInlineTag::Italic => 1,
+        XInlineTag::Strike => 2,
+        XInlineTag::Underline => 3,
+        XInlineTag::Code => 4,
+        XInlineTag::Link(_) => 5,
+    });
+    styles
+}
+
+/// Draft.js 的 offset/length 按 UTF-16 计，这里换成字符下标。
+fn x_range_bounds(chars: &[char], range: &serde_json::Value) -> Option<(usize, usize)> {
+    let offset = range.get("offset")?.as_u64()? as usize;
+    let length = range.get("length")?.as_u64()? as usize;
+    let start = x_utf16_to_char(chars, offset);
+    let end = x_utf16_to_char(chars, offset + length);
+    (start < end).then_some((start, end))
+}
+
+/// UTF-16 偏移 → 字符下标（emoji 等代理对不会把范围切错）。
+fn x_utf16_to_char(chars: &[char], utf16_offset: usize) -> usize {
+    let mut units = 0;
+    for (index, ch) in chars.iter().enumerate() {
+        if units >= utf16_offset {
+            return index;
+        }
+        units += ch.len_utf16();
+    }
+    chars.len()
 }
 
 /// 帖子全文：长推文在 `note_tweet` 里，普通推文在 `legacy.full_text` 里。
@@ -1893,6 +2488,28 @@ mod tests {
     }
 
     #[test]
+    fn x_article_urls_are_recognised() {
+        assert!(is_x_article_url(
+            "https://x.com/SuJinyan6/article/2116730566678868190"
+        ));
+        assert!(is_x_article_url("https://twitter.com/ethan/article/1?s=20"));
+        assert!(is_x_article_url(
+            "https://x.com/i/article/2116723416606924800"
+        ));
+        assert!(!is_x_article_url("https://x.com/ethan/status/1"));
+        assert!(!is_x_article_url("https://x.com/ethan"));
+        assert!(!is_x_article_url("https://example.com/ethan/article/1"));
+
+        assert!(is_x_post_url(
+            "https://x.com/SuJinyan6/article/2116730566678868190"
+        ));
+        assert!(is_x_post_url(
+            "https://x.com/UPing123zzz/status/2116729183334523014"
+        ));
+        assert!(!is_x_post_url("https://example.com/ethan/article/1"));
+    }
+
+    #[test]
     fn x_posts_use_the_first_text_line_as_title_and_embed_quoted_tweets() {
         let json = "{\"data\":{\"tweet_result_by_rest_id\":{\"id\":\"x\",\
             \"rest_id\":\"123\",\"result\":{\"__typename\":\"Tweet\",\
@@ -1926,6 +2543,178 @@ mod tests {
         );
         assert!(markdown.contains("朱峰（@zhufeng）"), "{markdown}");
         assert!(!markdown.contains("Sign up"), "不应混入页面 UI：{markdown}");
+    }
+
+    /// 把若干 SSR JSON 值包进一个 X 风格的脚本里（数据在 JS 字符串里）。
+    fn x_html(values: &[serde_json::Value]) -> String {
+        let parts: Vec<String> = values
+            .iter()
+            .map(|value| {
+                let escaped = serde_json::to_string(value)
+                    .unwrap()
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"");
+                format!("{{value:\"{escaped}\"}}")
+            })
+            .collect();
+        format!(
+            "<html><body><script nonce=\"x\">$_TSR.router=($R=>$R[0]=[{}])</script>\
+             <p>Sign up</p></body></html>",
+            parts.join(",")
+        )
+    }
+
+    fn x_article_json(content_state: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "data": {
+                "tweet_result_by_rest_id": {
+                    "id": "x",
+                    "rest_id": "123",
+                    "result": {
+                        "__typename": "Tweet",
+                        "core": {
+                            "user_results": {
+                                "result": {
+                                    "core": {"name": "Ethan", "screen_name": "ethan"}
+                                }
+                            }
+                        },
+                        "legacy": {"lang": "zh"},
+                        "article": {
+                            "article_results": {
+                                "result": {
+                                    "__typename": "ArticleEntity",
+                                    "title": "文章标题",
+                                    "plain_text": "第一段\n第二段",
+                                    "content_state": content_state,
+                                    "media_entities": [{
+                                        "media_id": "m1",
+                                        "media_info": {
+                                            "__typename": "ApiImage",
+                                            "original_img_url": "https://pbs.twimg.com/media/pic.jpg"
+                                        }
+                                    }],
+                                    "metadata": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn x_articles_use_the_article_title_and_draft_blocks() {
+        let content_state = serde_json::json!({
+            "blocks": [
+                {
+                    "type": "unstyled",
+                    "text": "开头 粗体 链接",
+                    "entity_ranges": [{"key": 0, "offset": 6, "length": 2}],
+                    "inline_style_ranges": [{"offset": 0, "length": 2, "style": "Bold"}]
+                },
+                {"type": "header-two", "text": "小标题", "entity_ranges": [], "inline_style_ranges": []},
+                {"type": "unordered-list-item", "text": "第一项", "entity_ranges": [], "inline_style_ranges": []},
+                {"type": "unordered-list-item", "text": "第二项", "entity_ranges": [], "inline_style_ranges": []},
+                {"type": "atomic", "text": " ", "entity_ranges": [{"key": 1, "offset": 0, "length": 1}], "inline_style_ranges": []},
+                {"type": "unstyled", "text": "图片之后", "entity_ranges": [], "inline_style_ranges": []}
+            ],
+            "entity_map": [
+                {"key": "0", "value": {"type": "LINK", "data": {"url": "https://example.com/start"}}},
+                {"key": "1", "value": {"type": "MEDIA", "data": {"media_items": [{"media_id": "m1"}]}}}
+            ]
+        });
+        let html = x_html(&[x_article_json(content_state)]);
+
+        let page = x_post_from_html("https://x.com/ethan/article/123", &html)
+            .expect("should extract an X article");
+        assert_eq!(page.title, "文章标题");
+        assert_eq!(page.site, "X");
+        assert_eq!(page.lang, "zh");
+        assert_eq!(page.images, vec!["https://pbs.twimg.com/media/pic.jpg"]);
+        assert!(page.chars > 20, "正文应有内容：{}", page.chars);
+
+        let markdown = page.markdown;
+        assert!(markdown.contains("Ethan（@ethan）"), "{markdown}");
+        assert!(markdown.contains("**开头**"), "粗体应保留：{markdown}");
+        assert!(
+            markdown.contains("[链接](https://example.com/start)"),
+            "链接应保留并改写成绝对地址：{markdown}"
+        );
+        assert!(
+            markdown.contains("## 小标题"),
+            "小标题应成为 Markdown 标题：{markdown}"
+        );
+        assert!(markdown.contains("第一项"), "列表应保留：{markdown}");
+        assert!(markdown.contains("第二项"), "列表应保留：{markdown}");
+        assert!(
+            markdown.contains("![图片]") || markdown.contains("<img"),
+            "图片应进入正文：{markdown}"
+        );
+        assert!(markdown.contains("图片之后"), "{markdown}");
+        assert!(!markdown.contains("Sign up"), "不应混入页面 UI：{markdown}");
+    }
+
+    #[test]
+    fn x_articles_win_over_the_card_copy_in_the_same_page() {
+        // 状态页里先出现文章卡（只有标题/摘要），后面才是带 content_state 的完整结果。
+        let card = serde_json::json!({
+            "data": {
+                "tweet_result_by_rest_id": {
+                    "id": "x",
+                    "rest_id": "123",
+                    "result": {
+                        "__typename": "Tweet",
+                        "article": {
+                            "article_results": {
+                                "result": {
+                                    "__typename": "ArticleEntity",
+                                    "title": "卡片标题",
+                                    "preview_text": "只有摘要",
+                                    "id": "QXJ0aWNsZUVudGl0eTox",
+                                    "rest_id": "1"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let content_state = serde_json::json!({
+            "blocks": [
+                {"type": "unstyled", "text": "完整正文", "entity_ranges": [], "inline_style_ranges": []}
+            ],
+            "entity_map": []
+        });
+        // 时间线里另一篇文章的完整结果：不按 URL 的 rest_id 过滤就会被它抢走。
+        let mut other = x_article_json(content_state.clone());
+        other["data"]["tweet_result_by_rest_id"]["rest_id"] = serde_json::json!("999");
+        other["data"]["tweet_result_by_rest_id"]["result"]["article"]["article_results"]["result"]
+            ["title"] = serde_json::json!("别的文章");
+        other["data"]["tweet_result_by_rest_id"]["result"]["article"]["article_results"]["result"]
+            ["content_state"]["blocks"][0]["text"] = serde_json::json!("别的正文");
+        let html = x_html(&[card, other, x_article_json(content_state)]);
+
+        let page = x_post_from_html("https://x.com/ethan/status/123", &html)
+            .expect("should pick the complete article payload");
+        assert_eq!(page.title, "文章标题");
+        assert!(page.markdown.contains("完整正文"), "{}", page.markdown);
+        assert!(!page.markdown.contains("只有摘要"), "{}", page.markdown);
+        assert!(!page.markdown.contains("别的正文"), "{}", page.markdown);
+    }
+
+    #[test]
+    fn x_login_gated_article_links_are_reported_as_blocked() {
+        let detail = x_login_gate_detail(
+            "https://x.com/i/jf/onboarding/web?redirect_after_login=%2Fi%2Farticle%2F2116723416606924800&mode=login",
+        )
+        .expect("should recognise the article login gate");
+        assert!(detail.contains("文章页"), "{detail}");
+        assert!(
+            x_login_gate_detail("https://x.com/SuJinyan6/article/2116730566678868190").is_none()
+        );
+        assert!(x_login_gate_detail("https://example.com/i/article/1").is_none());
     }
 
     #[test]

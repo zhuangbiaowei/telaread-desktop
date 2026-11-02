@@ -19,6 +19,9 @@
 - 站点适配：
   - 微信公众平台用微信内 UA + `#js_content`，避免被重定向到「环境异常」验证页；
   - X（Twitter）从 SSR 数据取长推文全文与引用帖，标题取正文第一行；
+  - X 长文章（`/<user>/article/<id>`，以及同一篇的 `/<user>/status/<id>`）按
+    `article_results.content_state` 还原文章标题、段落/小标题/列表/链接/图片；
+    `t.co` 文章短链对匿名客户端会落到登录页，返回可操作的 `TelaError::Blocked`；
   - 图片识别 `data-src` / `data-original` / `data-lazy-src` 等懒加载属性；
   - `display:none` / `hidden` 节点整棵跳过（微信小标题的 `unset` 标记不再出现）；
   - 验证页/登录墙会返回 `TelaError::Blocked`，不再把验证页存成文章。
