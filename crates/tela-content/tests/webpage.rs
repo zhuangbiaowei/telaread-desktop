@@ -448,3 +448,42 @@ fn fetches_an_x_post_with_a_smart_title() {
     assert!(page.markdown.contains("Ethan 恩宇"), "正文应包含作者");
     assert!(!page.markdown.contains("Sign up"), "不应混入登录按钮");
 }
+
+/// X 长文章：标题用文章标题，正文来自 SSR 的 Draft.js 块（而不是「作者 on X」）。
+#[test]
+#[ignore = "需要网络：手动验证 X 文章抓取"]
+fn fetches_an_x_article_with_its_own_title() {
+    let page = tela_content::webpage::fetch("https://x.com/SuJinyan6/article/2116730566678868190")
+        .expect("抓取 X 文章");
+    eprintln!(
+        "x article: title={:?} site={:?} chars={} markdown_len={} images={}",
+        page.title,
+        page.site,
+        page.chars,
+        page.markdown.len(),
+        page.images.len()
+    );
+    assert_eq!(page.site, "X");
+    assert_eq!(page.title, "2026 北美普通 PhD 找工小结");
+    assert!(page.chars > 5_000, "文章应抓到全文，实际 {} 字", page.chars);
+    assert!(page.images.len() >= 5, "文章正文里的图片应保留");
+    assert!(page.markdown.contains("Jinyan Su"), "正文应包含作者");
+    assert!(
+        page.markdown.contains("## "),
+        "小标题应保留为 Markdown 标题"
+    );
+    assert!(!page.markdown.contains("Sign up"), "不应混入登录按钮");
+}
+
+/// 同一篇文章的帖子地址（`/user/status/<id>`）也应走文章结构，标题不用「作者 on X」。
+#[test]
+#[ignore = "需要网络：手动验证 X 文章帖子地址抓取"]
+fn fetches_an_x_article_from_its_status_url() {
+    let page = tela_content::webpage::fetch("https://x.com/SuJinyan6/status/2116730566678868190")
+        .expect("抓取 X 文章帖子");
+    assert_eq!(page.site, "X");
+    assert_eq!(page.title, "2026 北美普通 PhD 找工小结");
+    assert!(page.chars > 5_000, "实际 {} 字", page.chars);
+    assert!(page.images.len() >= 5, "文章正文里的图片应保留");
+    assert!(!page.title.contains(" on X"), "标题不应是作者/站点外壳");
+}

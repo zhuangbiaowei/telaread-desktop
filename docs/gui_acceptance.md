@@ -24,7 +24,7 @@
 | S2 三栏 shell + 订阅列表 + 空态 | ✅ | `shell_view_model` 5 + `gui_shell` 2 passed；截图 |
 | S3 文章列表 + 阅读面板 + 交互 | ✅ | `gui_reader` 4 passed；三视图/翻页/失败重试；截图 |
 | S4 CI/验收/文档 | ✅（CI 配置已加，未在 GitHub runner 实跑） | `.github/workflows/ci.yml` 的 `gui` job；本文档 |
-| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 178 passed / 0 failed / 7 ignored |
+| 默认无 GUI 构建/测试 | ✅ 不回归 | `cargo test --workspace --locked` → 182 passed / 0 failed / 10 ignored |
 | GUI 测试无显示器运行 | ✅ Q-13 已解 | 去掉 `DISPLAY`/`WAYLAND_DISPLAY` 后 59 passed / 0 failed / 2 ignored |
 
 **总结论：Gui demo 已可用——`tela-gui` 打开即为“订阅 / 文章 / 对照阅读”三栏，默认 mock 数据可离线阅读，三种视图与翻页可用；S7 已接上推荐与「我的推荐」；S8 已接上 `Shift+B` 网页收藏与「我的收藏」。M4 其余功能尚未开始。**
@@ -114,10 +114,15 @@
   - 不可见节点：`display:none` / `hidden` 的子树整棵跳过（图片检查祖先链）。微信（mdnice 导出）
     在小标题两侧放了 `display:none` 的 `<span>unset</span>` 样式 hack，之前会变成正文里的
     “unsetunset”，现在会被剔除。
-  - X（Twitter）帖子：通用抽取只能拿到导航/登录按钮和“作者 on X”标题。`fetch` 识别
-    `/<user>/status/<id>` 后改走 `x_post_from_html`：从脚本里的 GraphQL 结果
-    `tweet_result_by_rest_id` 解析长推文全文（`note_tweet`）、作者与引用帖；标题取正文第一行
-    （≤80 字），正文按空行分段，引用帖作为引用块，页面 UI 文字不进入正文。
+  - X（Twitter）帖子与长文章：通用抽取只能拿到导航/登录按钮和“作者 on X”标题。`fetch` 识别
+    `/<user>/status/<id>` 与 `/<user>/article/<id>` 后改走 `x_post_from_html`：从脚本里的
+    GraphQL 结果 `tweet_result_by_rest_id` 解析长推文全文（`note_tweet`）、作者与引用帖，
+    以及长文章的 `article_results.result.content_state`（Draft.js 块）。同一页可能有多份
+    SSR 结果（文章卡只有标题/摘要，完整结果才带正文），取信息最全的一份。帖子标题取正文
+    第一行（≤80 字），正文按空行分段；文章标题用文章自己的 `title`，正文按块还原段落、
+    小标题、列表、链接、粗体等样式与图片。引用帖作为引用块，页面 UI 文字不进入正文。
+    `t.co` 文章短链对匿名客户端会 307 到登录页（`/i/jf/onboarding`），此时返回
+    `TelaError::Blocked`，提示改用公开的文章页或帖子页地址，不把登录页存成收藏。
 - 落库：正文 **Markdown** 写 `documents`（key = `web-` + URL 的 64 位 FNV-1a，
   连同页面语言），图片写 `cached_images`，收藏行写 `bookmarks`（schema v6）。
   图片下载失败不阻断收藏，只记录成功张数；再次收藏同一 URL 复用同一条目并刷新内容
@@ -131,10 +136,10 @@
 - 侧栏在「我的推荐」下方新增「我的收藏」入口（显示条数）；中间栏列出标题、站点、日期、
   图片数与网址，行内「移除」删除收藏并清理只被它引用的正文；删除正在阅读的收藏会让阅读面板
   回到空态。
-- 验收：`webpage` 15 passed / 3 ignored（真实网络冒烟：普通网页、公众号文章、X 帖子）、
+- 验收：`webpage` 15 passed / 5 ignored（真实网络冒烟：普通网页、公众号文章、X 帖子、X 文章/文章帖子地址）、
   `markdown`（tela-content lib）14 passed、`store_v2` 19 passed、`shell_view_model` 14 passed、
   `gui_shell` 9 passed（含 `Shift+B` → 输入 → 提交 → 列表/阅读）、
-  `services_v2` 17 passed / 4 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、带图页面/图片缓存）、截图 2 张。
+  `services_v2` 17 passed / 5 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、X 文章、带图页面/图片缓存）、截图 2 张。
 
 ## 2. 验收命令与实测结果
 
@@ -144,7 +149,7 @@
 ```bash
 # 1) 默认构建/测试（不编译 gpui-kit，保护无 GUI 系统库的机器）
 cargo test --workspace --locked
-# 实测：178 passed / 0 failed / 7 ignored（真实网络冒烟用例）
+# 实测：182 passed / 0 failed / 10 ignored（真实网络冒烟用例）
 
 # 2) GUI 测试（无头；显式去掉显示环境，证明不依赖显示器）
 env -u DISPLAY -u WAYLAND_DISPLAY \

@@ -526,6 +526,44 @@ fn add_bookmark_fetches_an_x_post_with_a_smart_title() {
     );
 }
 
+/// X 长文章端到端：收藏 `/user/article/<id>` 后标题、正文块与图片都应落库。
+///
+/// ```bash
+/// cargo test -p tela-app --test services_v2 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "需要网络：手动验证 X 文章收藏"]
+fn add_bookmark_fetches_an_x_article() {
+    let dir = tempfile::tempdir().unwrap();
+    let services = AppServices::open(
+        AppConfig::for_tests(dir.path().join("tela.db")),
+        content(),
+        Arc::new(MockTransport::new()),
+    )
+    .unwrap();
+
+    let item = services
+        .add_bookmark("https://x.com/SuJinyan6/article/2116730566678868190")
+        .expect("收藏 X 文章");
+    eprintln!("x article bookmark: {item:?}");
+    assert_eq!(item.site, "X");
+    assert_eq!(item.title, "2026 北美普通 PhD 找工小结");
+    assert!(item.image_count > 0, "文章图片应下载缓存：{item:?}");
+
+    let request = services.bookmark_request_for(item.id).unwrap();
+    let chapter = services
+        .content()
+        .load_chapter(&request)
+        .expect("读收藏正文");
+    assert!(chapter.content.blocks.len() > 40);
+    assert!(
+        chapter.content.stats.chars > 5_000,
+        "文章应保存全文，实际 {} 字",
+        chapter.content.stats.chars
+    );
+    assert!(!chapter.content.images.is_empty());
+}
+
 /// 图片链路：Markdown 里保留绝对图片地址，图片字节进本地缓存，离线也能读。
 #[test]
 #[ignore = "需要网络：手动验证带图片的网页收藏"]
