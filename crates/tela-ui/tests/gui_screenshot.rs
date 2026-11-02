@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use gpui::{AppContext, HeadlessAppContext, px, size};
+use gpui::{AppContext, HeadlessAppContext, Keystroke, px, size};
 use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
@@ -267,4 +267,108 @@ fn captures_bookmarks_pane_and_dialog() {
     let path = dir.join("s8-bookmark-dialog.png");
     image.save(&path).expect("save screenshot");
     eprintln!("saved {}", path.display());
+}
+
+/// 滚动演示数据：12 个订阅、每个订阅 20 篇；900×420 的窗口下两个列表都必然超过一屏。
+struct ScrollDemoData;
+
+impl ShellData for ScrollDemoData {
+    fn feeds(&self) -> Result<Vec<FeedItem>, TelaError> {
+        Ok((1..=12)
+            .map(|id| FeedItem {
+                id,
+                title: format!("示例博客 {id}"),
+                feed_url: format!("https://example.com/{id}.xml"),
+                unread: 20,
+                article_count: 20,
+                status: "active".to_string(),
+            })
+            .collect())
+    }
+
+    fn articles(&self, feed_id: i64) -> Result<Vec<ArticleItem>, TelaError> {
+        Ok((0..20)
+            .map(|index| {
+                let id = feed_id * 100 + index;
+                ArticleItem {
+                    id,
+                    feed_id,
+                    url: Some(format!("https://example.com/articles/{id}")),
+                    title: format!("博客 {feed_id} 的文章 {index}"),
+                    unread: true,
+                    published_at: Some(1_761_350_400 + index),
+                    excerpt: Some(format!("第 {index} 篇的摘要，用来撑出足够的列表高度。")),
+                }
+            })
+            .collect())
+    }
+
+    fn chapter_request(&self, _article_id: i64) -> Result<ChapterRequest, TelaError> {
+        Ok(ChapterRequest::new(MOCK_CONTENT_KEY, "zh-Hans"))
+    }
+}
+
+fn draw_frame(cx: &mut HeadlessAppContext, window: gpui::AnyWindowHandle) {
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+}
+
+/// 在无头窗口里按一个键并画一帧：列表滚动在 prepaint 里才写入 `ScrollHandle`。
+fn press_key(cx: &mut HeadlessAppContext, window: gpui::AnyWindowHandle, key: &str) {
+    cx.update_window(window, |_, window, cx| {
+        window.dispatch_keystroke(Keystroke::parse(key).expect("parse keystroke"), cx);
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+}
+
+fn save_png(cx: &mut HeadlessAppContext, window: gpui::AnyWindowHandle, name: &str) {
+    let image = cx.capture_screenshot(window).expect("capture screenshot");
+    let dir = screenshot_dir();
+    std::fs::create_dir_all(&dir).expect("create screenshot dir");
+    let path = dir.join(name);
+    image.save(&path).expect("save screenshot");
+    eprintln!("saved {}", path.display());
+}
+
+/// 条目跳转时列表跟随滚动的截图（PR 前后对比/验收用）。
+///
+/// 依次按 `j` 12 次、`Shift+j` 9 次：修复前选中项移出视口而列表停在原地，
+/// 修复后文章列表与左侧订阅列表都会跟随，选中项始终留在视口内。
+#[test]
+#[ignore = "需要本机 WGPU headless renderer；CI 无 GPU 适配器"]
+fn captures_list_scroll_following_selection() {
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(ScrollDemoData);
+    let content = content();
+    let handle = cx
+        .open_window(size(px(900.), px(420.)), move |_, cx| {
+            cx.new(|cx| ShellView::new(data, content, cx))
+        })
+        .expect("open headless window");
+
+    // 首帧拿焦点，第二帧让列表完成布局。
+    draw_frame(&mut cx, handle.into());
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+
+    // j 走到第 13 篇：列表跟随选中项。
+    for _ in 0..12 {
+        press_key(&mut cx, handle.into(), "j");
+    }
+    save_png(&mut cx, handle.into(), "s9-list-scroll-articles.png");
+
+    // Shift+j 切到第 10 个订阅：左侧订阅列表跟随选中项。
+    for _ in 0..9 {
+        press_key(&mut cx, handle.into(), "shift-j");
+    }
+    save_png(&mut cx, handle.into(), "s9-list-scroll-feeds.png");
 }

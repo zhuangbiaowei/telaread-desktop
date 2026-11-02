@@ -184,9 +184,15 @@ cargo test -p tela-ui --features gui-test --test gui_screenshot -- --ignored --n
 | S3 三栏 + 对照阅读（1100×720 headless 渲染） | ![S3](images/gui-s3-reader.png) |
 | S8 「我的收藏」+ 收藏的网页阅读 | ![S8 bookmarks](images/gui-s8-bookmarks.png) |
 | S8 `Shift+B` 收藏网页弹窗 | ![S8 dialog](images/gui-s8-bookmark-dialog.png) |
+| 条目跳转滚动：`j` 连按 12 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll articles](images/gui-list-scroll-articles.png) |
+| 条目跳转滚动：`Shift+j` 连按 9 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll feeds](images/gui-list-scroll-feeds.png) |
 
 S3 截图由 `gui_screenshot` 用 GPUI `HeadlessAppContext` + WGPU 渲染，和真实窗口共用
 同一套 `ShellView`/`ReaderView` 代码，不依赖显示器。
+
+条目跳转滚动截图来自 `gui_screenshot::captures_list_scroll_following_selection`
+（900×420 headless 渲染）：同一组按键在基线上选中项移出视口而列表不动，修复后
+文章列表与左侧订阅列表都会跟随选中项。
 
 ## 4. 关键工程决策（含踩坑记录）
 
