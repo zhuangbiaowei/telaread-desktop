@@ -74,6 +74,14 @@ pub struct ShellView {
     bookmark_notice: Option<String>,
     /// 收藏弹窗的事件订阅；必须保活。
     bookmark_subscription: Option<Subscription>,
+    /// 左侧订阅列表的滚动句柄：`Shift+J/K` 切换订阅时让列表跟着滚。
+    feed_scroll: ScrollHandle,
+    /// 中间文章列表的滚动句柄：`j/k` 切换文章时让列表跟着滚。
+    article_scroll: ScrollHandle,
+    /// “我的推荐”列表的滚动句柄：`j/k` 切换推荐项时让列表跟着滚。
+    recommendation_scroll: ScrollHandle,
+    /// “我的收藏”列表的滚动句柄：`j/k` 切换收藏项时让列表跟着滚。
+    bookmark_scroll: ScrollHandle,
     /// 阅读面板的推荐事件订阅；必须保活。
     _reader_subscription: Subscription,
 }
@@ -185,6 +193,10 @@ impl ShellView {
             bookmark_dialog: None,
             bookmark_notice: None,
             bookmark_subscription: None,
+            feed_scroll: ScrollHandle::new(),
+            article_scroll: ScrollHandle::new(),
+            recommendation_scroll: ScrollHandle::new(),
+            bookmark_scroll: ScrollHandle::new(),
             _reader_subscription,
         };
         view.sync_reader(cx);
@@ -194,6 +206,16 @@ impl ShellView {
     /// 当前视图模型（测试与状态栏用）。
     pub fn model(&self) -> &ShellViewModel {
         &self.model
+    }
+
+    /// 左侧订阅列表的滚动位置（测试/诊断用）。
+    pub fn feed_scroll_offset(&self) -> Point<Pixels> {
+        self.feed_scroll.offset()
+    }
+
+    /// 中间文章列表的滚动位置（测试/诊断用）。
+    pub fn article_scroll_offset(&self) -> Point<Pixels> {
+        self.article_scroll.offset()
     }
 
     /// 阅读面板实体（测试/后续状态联动用）。
@@ -386,6 +408,9 @@ impl ShellView {
             if let Some(article_id) = self.model.selected_article {
                 let _ = self.mark_read_if_needed(article_id, cx);
             }
+            // 点击/快捷键切换后，让左侧订阅和中间文章列表跟上选中项。
+            self.scroll_feed_into_view();
+            self.scroll_to_selection();
         }
         changed
     }
@@ -410,6 +435,9 @@ impl ShellView {
             self.sync_reader(cx);
         }
         let marked = self.mark_read_if_needed(article_id, cx);
+        if changed {
+            self.scroll_to_selection();
+        }
         changed || marked
     }
 
@@ -507,6 +535,7 @@ impl ShellView {
         if self.model.section == ShellSection::Bookmarks {
             self.model.select_bookmark(item.id);
             self.sync_reader(cx);
+            self.scroll_to_selection();
         }
         cx.notify();
     }
@@ -527,6 +556,7 @@ impl ShellView {
         let changed = self.model.select_bookmark(bookmark_id);
         if changed {
             self.sync_reader(cx);
+            self.scroll_to_selection();
         }
         changed
     }
@@ -566,6 +596,9 @@ impl ShellView {
         }
         // 即使这篇已经选中（例如启动时自动展示的第一篇），再点一次也应当标已读。
         let marked = self.mark_read_if_needed(article_id, cx);
+        if changed {
+            self.scroll_to_selection();
+        }
         changed || marked
     }
 
@@ -578,6 +611,7 @@ impl ShellView {
         if let Some(article_id) = self.model.selected_article {
             let _ = self.mark_read_if_needed(article_id, cx);
         }
+        self.scroll_to_selection();
         true
     }
 
@@ -590,6 +624,7 @@ impl ShellView {
         if let Some(article_id) = self.model.selected_article {
             let _ = self.mark_read_if_needed(article_id, cx);
         }
+        self.scroll_to_selection();
         true
     }
 
@@ -602,6 +637,8 @@ impl ShellView {
         if let Some(article_id) = self.model.selected_article {
             let _ = self.mark_read_if_needed(article_id, cx);
         }
+        self.scroll_feed_into_view();
+        self.scroll_to_selection();
         true
     }
 
@@ -614,7 +651,59 @@ impl ShellView {
         if let Some(article_id) = self.model.selected_article {
             let _ = self.mark_read_if_needed(article_id, cx);
         }
+        self.scroll_feed_into_view();
+        self.scroll_to_selection();
         true
+    }
+
+    /// 把当前订阅滚进左侧列表的可视区；已可见时 GPUI 只做最小移动。
+    fn scroll_feed_into_view(&self) {
+        if let Some(index) = self
+            .model
+            .selected_feed
+            .and_then(|id| self.model.feeds.iter().position(|feed| feed.id == id))
+        {
+            self.feed_scroll.scroll_to_item(index);
+        }
+    }
+
+    /// 把当前栏的选中条目滚进列表的可视区。
+    ///
+    /// 列表在渲染时用 `track_scroll` 记录每个子项的位置，这里只登记目标下标，
+    /// 真正的偏移在下一帧 prepaint 里生效；因此 `j/k` 走到屏幕外时列表会跟随，
+    /// 仍在屏幕内时则不会乱跳。
+    fn scroll_to_selection(&self) {
+        match self.model.section {
+            ShellSection::Feed => {
+                if let Some(index) = self.model.selected_article.and_then(|id| {
+                    self.model
+                        .articles
+                        .iter()
+                        .position(|article| article.id == id)
+                }) {
+                    self.article_scroll.scroll_to_item(index);
+                }
+            }
+            ShellSection::Recommendations => {
+                if let Some(index) = self.model.selected_recommendation.and_then(|id| {
+                    self.model
+                        .recommendations
+                        .iter()
+                        .position(|item| item.article_id == id)
+                }) {
+                    self.recommendation_scroll.scroll_to_item(index);
+                }
+            }
+            ShellSection::Bookmarks => {
+                if let Some(index) = self
+                    .model
+                    .selected_bookmark
+                    .and_then(|id| self.model.bookmarks.iter().position(|item| item.id == id))
+                {
+                    self.bookmark_scroll.scroll_to_item(index);
+                }
+            }
+        }
     }
 
     /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客，`Shift+b` 收藏网页。
@@ -1227,6 +1316,7 @@ impl ShellView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.feed_scroll)
             .p_2()
             .gap_1();
 
@@ -1415,6 +1505,7 @@ impl ShellView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.article_scroll)
             .p_2()
             .gap_1();
 
@@ -1480,6 +1571,7 @@ impl ShellView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.recommendation_scroll)
             .p_2()
             .gap_1();
 
@@ -1636,6 +1728,7 @@ impl ShellView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.bookmark_scroll)
             .p_2()
             .gap_1();
 

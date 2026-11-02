@@ -151,6 +151,15 @@ fn article(id: i64, feed_id: i64, title: &str) -> ArticleItem {
     }
 }
 
+/// 画一帧。键盘只登记“要滚到哪个条目”，列表偏移在 prepaint 里才写入
+/// `ScrollHandle`，因此断言滚动位置前必须先画一帧。
+fn draw_once(cx: &mut TestAppContext, window: gpui::AnyWindowHandle) {
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+}
+
 fn open_window<V: Render>(
     cx: &mut TestAppContext,
     build: impl FnOnce(&mut Window, &mut gpui::App) -> Entity<V>,
@@ -384,6 +393,104 @@ fn keyboard_navigates_articles_and_feeds(cx: &mut TestAppContext) {
         window.draw(cx).clear(cx);
     })
     .unwrap();
+}
+
+/// 列表跟随选中项：`j/k` 与 `Shift+j/k` 把选中项移出视口时，
+/// 文章列表与左侧订阅列表都必须跟着滚，不能只在数据上切换。
+#[gpui::test]
+fn keyboard_navigation_scrolls_lists_to_follow_selection(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let feeds: Vec<FeedItem> = (1..=12)
+        .map(|id| feed(id, &format!("博客 {id}"), 1, 20))
+        .collect();
+    let mut articles = HashMap::new();
+    for feed_id in 1..=12 {
+        articles.insert(
+            feed_id,
+            (0..20)
+                .map(|i| article(feed_id * 100 + i, feed_id, &format!("文章 {feed_id}-{i}")))
+                .collect::<Vec<_>>(),
+        );
+    }
+    let data: Arc<dyn ShellData> = Arc::new(FakeData {
+        feeds,
+        articles,
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        ..FakeData::default()
+    });
+    // 窗口矮一些：很快就能把选中项移出视口，覆盖“超出屏幕”的路径。
+    let (window, view) = open_window_sized(cx, size(px(900.), px(420.)), move |_, cx| {
+        cx.new(|cx| ShellView::new(data, content(), cx))
+    });
+
+    // 首帧拿焦点，第二帧让列表完成布局/滚动状态初始化。
+    draw_once(cx, window);
+    cx.run_until_parked();
+    draw_once(cx, window);
+
+    let article_offset =
+        |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).article_scroll_offset().y);
+    let feed_offset =
+        |cx: &mut TestAppContext| cx.update(|cx| view.read(cx).feed_scroll_offset().y);
+
+    assert_eq!(article_offset(cx), px(0.), "首帧文章列表在顶部");
+
+    // 一路 j 到第 13 篇：文章列表必须向下滚。
+    for _ in 0..12 {
+        cx.simulate_keystrokes(window, "j");
+        draw_once(cx, window);
+    }
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(112),
+        "j 应选中第 13 篇"
+    );
+    assert!(
+        article_offset(cx) < px(0.),
+        "选中项滚出屏幕后文章列表应跟随，实际偏移 {:?}",
+        article_offset(cx)
+    );
+
+    // 再一路 k 回到第 1 篇：列表滚回顶部。
+    for _ in 0..12 {
+        cx.simulate_keystrokes(window, "k");
+        draw_once(cx, window);
+    }
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(100)
+    );
+    assert!(
+        article_offset(cx) > px(-16.),
+        "回到第一篇后列表应回到顶部，实际偏移 {:?}",
+        article_offset(cx)
+    );
+
+    // 连续 Shift+j 切换订阅：左侧订阅列表同样要跟随。
+    for _ in 0..9 {
+        cx.simulate_keystrokes(window, "shift-j");
+        draw_once(cx, window);
+    }
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_feed),
+        Some(10)
+    );
+    assert!(
+        feed_offset(cx) < px(0.),
+        "切换订阅跨出一屏后订阅列表应跟随，实际偏移 {:?}",
+        feed_offset(cx)
+    );
+    // 换订阅后文章列表回到新订阅的第一篇（不保留上一篇的滚动位置）。
+    assert_eq!(
+        cx.update(|cx| view.read(cx).model().selected_article),
+        Some(1000)
+    );
+    assert!(
+        article_offset(cx) > px(-16.),
+        "换订阅后文章列表应回到顶部，实际偏移 {:?}",
+        article_offset(cx)
+    );
 }
 
 /// 长文连续阅读：一直按 PageDown 必须能一路滚到全文末尾，中途不切段落页。
