@@ -55,6 +55,21 @@ cargo run -p tela-app -- demo --chapter mock-long
 | `TELA_TOKEN_STORE` | `keyring` | `memory` / `ephemeral` 仅用于测试或临时会话，退出即失效 |
 | `TELA_DEMO` | （未设置） | GUI 默认真实 API（登录模式）；`1`/`true`/`yes`/`on` 进入 demo |
 | `TELA_DEV_SEED` | （未设置） | demo 装配且空库时是否写演示数据；`0` 关闭 |
+| `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | 继承环境 | 标准代理变量（大小写均可），真实 API 与网页抓取请求都会走代理 |
+
+#### 走本地代理
+
+HTTP 客户端读环境里的 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`
+（大小写均可），所以不需要改代码就能让 Tela 走本地代理：
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7888 tela-desktop
+```
+
+`~/.local/bin/tela-desktop` 启动脚本会自动探测本机代理：先试 `TELA_PROXY`，
+再依次试 `TELA_PROXY_CANDIDATES`（默认 `127.0.0.1:7888`、`7890`、`1080`）；
+探测到可用代理就导出代理变量，探测不到就直连。探测结果写进
+`~/.local/state/tela-desktop.log`。`TELA_PROXY=off` 可强制直连。
 
 `TELA_DB` 默认路径按平台选择：`$XDG_DATA_HOME/tela/tela.db`（如果设置了
 `XDG_DATA_HOME`）；Windows 为 `%APPDATA%\tela\tela.db`；否则

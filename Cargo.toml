@@ -49,6 +49,9 @@ reqwest = { version = "0.13", default-features = false, features = [
     "charset",
     "gzip",
     "blocking",
+    # 让 reqwest 识别 http_proxy / https_proxy / all_proxy / no_proxy，
+    # 这样启动脚本探测到本地代理后只要导出环境变量即可生效（见 ~/.local/bin/tela-desktop）。
+    "system-proxy",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 # 刷新令牌必须进系统凭据库（macOS Keychain / Windows Credential Manager /
