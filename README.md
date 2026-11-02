@@ -4,7 +4,7 @@
 
 基于 [Tela](https://telaread.com) 的桌面阅读器（Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit)）。
 
-> **当前进度（v0.4.3）**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
+> **当前进度（v0.4.4）**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
 > 全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、订阅级一键离线缓存、
 > 推荐文章与「我的推荐」、`Shift+B` 收藏任意网页到「我的收藏」、断网自动暂停译文轮询、
 > 终端 CLI 与离线 GUI demo。
@@ -119,7 +119,7 @@ HTTPS_PROXY=http://127.0.0.1:7888 tela-desktop
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.4.2
+cargo run -p tela-app -- --version                        # tela-app 0.4.4
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -371,8 +371,8 @@ SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.3 -m "Tela Desktop v0.4.3"
-git push origin v0.4.3
+git tag -a v0.4.4 -m "Tela Desktop v0.4.4"
+git push origin v0.4.4
 ```
 
 推送 tag 后：
@@ -390,8 +390,8 @@ git push origin v0.4.3
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.3-rc.1 -m "Tela Desktop v0.4.3-rc.1"
-git push origin v0.4.3-rc.1
+git tag -a v0.4.4-rc.1 -m "Tela Desktop v0.4.4-rc.1"
+git push origin v0.4.4-rc.1
 ```
 
 Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；

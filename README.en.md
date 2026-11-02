@@ -4,7 +4,7 @@ A desktop reader for [Tela](https://telaread.com) (Rust + [GPUI Kit](https://git
 
 English | [简体中文](./README.md)
 
-> **Current status (v0.4.3)**: **The real API v1 foundation is wired up** — OAuth 2.1 + PKCE login, refresh
+> **Current status (v0.4.4)**: **The real API v1 foundation is wired up** — OAuth 2.1 + PKCE login, refresh
 > tokens stored in the OS credential store, full/incremental sync, an offline mutation queue,
 > local-first reading of bodies/translations/images, one-click per-subscription offline caching,
 > article recommendations and "My Recommendations", `Shift+B` bookmarking of any web page into
@@ -107,7 +107,7 @@ declares `rust-version = "1.92"`). `reqwest` uses rustls (aws-lc-rs), so the fir
 ```bash
 cargo build --workspace --locked                          # build
 cargo test --workspace --locked                           # all tests (including real API fixture contracts)
-cargo run -p tela-app -- --version                        # tela-app 0.4.2
+cargo run -p tela-app -- --version                        # tela-app 0.4.4
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -313,8 +313,8 @@ Releases are automated by [`release.yml`](./.github/workflows/release.yml):
 ```bash
 # after removing the v prefix, the tag must equal tela-app's version in Cargo.toml
 # the TELA_CLIENT_ID repository variable must be configured before building (release packages embed it)
-git tag -a v0.4.3 -m "Tela Desktop v0.4.3"
-git push origin v0.4.3
+git tag -a v0.4.4 -m "Tela Desktop v0.4.4"
+git push origin v0.4.4
 ```
 
 After pushing the tag:
@@ -331,8 +331,8 @@ After pushing the tag:
 Pre-releases use a hyphenated tag and are automatically marked as prerelease:
 
 ```bash
-git tag -a v0.4.3-rc.1 -m "Tela Desktop v0.4.3-rc.1"
-git push origin v0.4.3-rc.1
+git tag -a v0.4.4-rc.1 -m "Tela Desktop v0.4.4-rc.1"
+git push origin v0.4.4-rc.1
 ```
 
 The Linux GUI depends on Wayland/Vulkan/font system libraries; the Windows package is a native

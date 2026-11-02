@@ -3,6 +3,17 @@
 本项目的版本发布见 [GitHub Releases](https://github.com/zhuangbiaowei/telaread-desktop/releases)。
 下面按版本记录桌面端的主要变化；更细的提交历史见 `git log`。
 
+## v0.4.4 — 2026-11-02
+
+**代理支持**：HTTP 客户端读取环境变量里的代理设置。
+
+- 启用 reqwest 的 `system-proxy`（此前为了只用 rustls 关掉了默认特性，
+  连带关掉了环境代理）：`http_proxy` / `https_proxy` / `all_proxy` / `no_proxy`
+  （大小写均可）对真实 API 的登录、同步与网页收藏抓取同时生效，
+  不需要改代码或重编。`Cargo.lock` 相应引入 `system-configuration 0.7.0`（macOS 分支）。
+- README 补充代理变量说明、本地代理用法示例，以及启动脚本的探测规则
+  （`TELA_PROXY` / `TELA_PROXY_CANDIDATES`；`TELA_PROXY=off` 强制直连）。
+
 ## v0.4.3 — 2026-11-02
 
 **网页收藏（`Shift+B`）**：把任意网址保存为本地可离线阅读的文章。
