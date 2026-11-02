@@ -246,7 +246,7 @@ pub fn fetch(raw_url: &str) -> Result<WebPage, TelaError> {
     let mut page = parse_html(&final_url, &html);
     if is_x_post {
         // 文章卡的 SSR 有时只有标题/摘要，正文仍来自页面 DOM（通用抽取）。
-        if let Some(title) = x_article_title(&html) {
+        if let Some(title) = x_article_title(&html, &final_url) {
             page.title = title;
         }
         page.site = "X".to_string();
@@ -656,7 +656,7 @@ fn x_login_gate_detail(final_url: &str) -> Option<String> {
 /// 长推文正文在 `note_tweet`。两者都从脚本里的 GraphQL 结果 `tweet_result_by_rest_id`
 /// 取；同一页可能出现多份（文章卡只有标题/摘要，完整帖子才有正文），取信息最全的一份。
 fn x_post_from_html(url: &str, html: &str) -> Option<WebPage> {
-    let root = x_tweet_result(html)?;
+    let root = x_tweet_result(html, url)?;
     // `tweet_result_by_rest_id` 外面还包了一层 `{id, rest_id, result}`。
     let tweet = root.get("result").unwrap_or(&root);
     if let Some(page) = x_article_from_tweet(url, tweet) {
@@ -898,9 +898,54 @@ fn flush_x_list(list: &mut Option<(&'static str, Vec<String>)>, blocks: &mut Vec
     }
 }
 
-/// 取 SSR 脚本里的 `tweet_result_by_rest_id` 对象；同页多份时取信息最全的。
-fn x_tweet_result(html: &str) -> Option<serde_json::Value> {
-    x_tweet_results(html).into_iter().max_by_key(x_tweet_score)
+/// 取 SSR 脚本里的 `tweet_result_by_rest_id` 对象。
+///
+/// 同页多份时先按 URL 里的帖子/文章 id 过滤（时间线、回复里可能混进别的文章），
+/// 再取信息最全的一份。
+fn x_tweet_result(html: &str, url: &str) -> Option<serde_json::Value> {
+    let mut results = x_tweet_results(html);
+    if let Some(target) = x_post_id(url) {
+        let matching: Vec<serde_json::Value> = results
+            .iter()
+            .filter(|root| x_result_rest_id(root).as_deref() == Some(target.as_str()))
+            .cloned()
+            .collect();
+        if !matching.is_empty() {
+            results = matching;
+        }
+    }
+    results.into_iter().max_by_key(x_tweet_score)
+}
+
+/// URL 里的帖子/文章 id（`/<user>/status/<id>`、`/<user>/article/<id>`）。
+fn x_post_id(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !is_x_host(parsed.host_str().unwrap_or("")) {
+        return None;
+    }
+    let segments: Vec<&str> = parsed
+        .path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.len() >= 3 && matches!(segments[1], "status" | "article") {
+        Some(segments[2].to_string())
+    } else {
+        None
+    }
+}
+
+/// SSR 结果自己的 rest_id（`{id, rest_id, result}` 的外层）。
+fn x_result_rest_id(root: &serde_json::Value) -> Option<String> {
+    root.get("rest_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            root.get("result")
+                .and_then(|result| result.get("rest_id"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// 一份 SSR 结果的可用程度：完整长文章 > 带正文的帖子 > 文章卡/时间线片段。
@@ -954,8 +999,8 @@ fn x_tweet_results(html: &str) -> Vec<serde_json::Value> {
 }
 
 /// 文章卡的标题（状态页的 SSR 里可能只有标题/摘要，没有完整正文）。
-fn x_article_title(html: &str) -> Option<String> {
-    let root = x_tweet_result(html)?;
+fn x_article_title(html: &str, url: &str) -> Option<String> {
+    let root = x_tweet_result(html, url)?;
     let tweet = root.get("result").unwrap_or(&root);
     let title = tweet
         .pointer("/article/article_results/result/title")?
@@ -2642,13 +2687,21 @@ mod tests {
             ],
             "entity_map": []
         });
-        let html = x_html(&[card, x_article_json(content_state)]);
+        // 时间线里另一篇文章的完整结果：不按 URL 的 rest_id 过滤就会被它抢走。
+        let mut other = x_article_json(content_state.clone());
+        other["data"]["tweet_result_by_rest_id"]["rest_id"] = serde_json::json!("999");
+        other["data"]["tweet_result_by_rest_id"]["result"]["article"]["article_results"]["result"]
+            ["title"] = serde_json::json!("别的文章");
+        other["data"]["tweet_result_by_rest_id"]["result"]["article"]["article_results"]["result"]
+            ["content_state"]["blocks"][0]["text"] = serde_json::json!("别的正文");
+        let html = x_html(&[card, other, x_article_json(content_state)]);
 
         let page = x_post_from_html("https://x.com/ethan/status/123", &html)
             .expect("should pick the complete article payload");
         assert_eq!(page.title, "文章标题");
         assert!(page.markdown.contains("完整正文"), "{}", page.markdown);
         assert!(!page.markdown.contains("只有摘要"), "{}", page.markdown);
+        assert!(!page.markdown.contains("别的正文"), "{}", page.markdown);
     }
 
     #[test]
