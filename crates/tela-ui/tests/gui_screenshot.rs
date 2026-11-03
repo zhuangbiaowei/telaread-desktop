@@ -152,7 +152,7 @@ fn content() -> Arc<dyn ContentApi> {
 fn captures_the_three_pane_reader() {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        Arc::new(gpui_kit::assets::Assets),
+        Arc::new(gpui_kit::assets::AllAssets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
@@ -196,7 +196,7 @@ fn captures_the_three_pane_reader() {
 fn captures_bookmarks_pane_and_dialog() {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        Arc::new(gpui_kit::assets::Assets),
+        Arc::new(gpui_kit::assets::AllAssets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
@@ -342,7 +342,7 @@ fn save_png(cx: &mut HeadlessAppContext, window: gpui::AnyWindowHandle, name: &s
 fn captures_list_scroll_following_selection() {
     let mut cx = HeadlessAppContext::with_platform(
         gpui_kit::platform::current_platform(true).text_system(),
-        Arc::new(gpui_kit::assets::Assets),
+        Arc::new(gpui_kit::assets::AllAssets),
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(gpui_kit::init);
@@ -371,4 +371,71 @@ fn captures_list_scroll_following_selection() {
         press_key(&mut cx, handle.into(), "shift-j");
     }
     save_png(&mut cx, handle.into(), "s9-list-scroll-feeds.png");
+}
+
+/// 主题选择器 + 不同主题的截图（README/验收用）。
+///
+/// 先截默认深色主题下的三栏 + 主题选择器，再切到浅色主题截同样的三栏，
+/// 用来人工确认图标、正文颜色与边框都随主题变化。
+#[test]
+#[ignore = "需要本机 WGPU headless renderer；CI 无 GPU 适配器"]
+fn captures_theme_picker_and_light_theme() {
+    use tela_ui::theme::ThemeCatalog;
+
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::AllAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(DemoData);
+    let content = content();
+    let catalog = ThemeCatalog::builtin();
+    let handle = cx
+        .open_window(size(px(1100.), px(720.)), move |_, cx| {
+            cx.new(|cx| {
+                ShellView::new_with_theme_catalog(
+                    data, content, None, None, None, None, catalog, cx,
+                )
+            })
+        })
+        .expect("open headless window");
+    let view = cx.update(|cx| handle.entity(cx)).expect("root view entity");
+
+    draw_frame(&mut cx, handle.into());
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| view.open_theme_picker(cx));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    save_png(&mut cx, handle.into(), "s10-theme-picker-dark.png");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.apply_theme("catppuccin-latte", cx));
+            view.close_theme_picker(cx);
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+    save_png(&mut cx, handle.into(), "s10-theme-light.png");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| {
+            assert!(view.apply_theme("paper", cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+    save_png(&mut cx, handle.into(), "s10-theme-paper.png");
 }

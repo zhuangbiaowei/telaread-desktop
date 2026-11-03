@@ -1131,18 +1131,37 @@ fn on_pull_applied(&mut self, cx: &mut Context<Self>, snapshot: Arc<Tables>) {
 
 ### 9.6 主题
 
-- 在启动时把 Tela 的 token 注册为 gpui-kit `Theme`（`Theme::update`）；
-- 亮/暗两套，跟随系统（`cx.observe_system_theme`）；
-- 自定义 token 放在 `TelaTheme` Global，UI 用 `cx.tela_theme()` 读取；
-- 主题 pref 同步（`ui.theme` = `system|light|dark`），但设备本地也缓存一份避免首帧闪烁。
+主题不是「亮/暗两套写死配色」，而是一组可替换的配置：**图标 + 排版（字体与颜色）+
+边框修饰**。一组配置就是一个主题。
+
+- 数据模型在 `tela-ui::theme`（无 GUI feature 也能测）：
+  `TelaTheme { id, name, appearance, icons, typography, colors, borders, source }`；
+- 内置主题编译进二进制（`crates/tela-ui/themes/*.toml`，`include_str!` 加载），
+  用户主题放在 `<数据目录>/themes/<id>.toml`；同 id 覆盖内置主题；
+- 主题解析失败不阻止启动：错误收集进 `ThemeCatalog::issues`，在主题选择器底部展示；
+- 当前选择写在 `<数据目录>/ui.toml`（`theme = "<id>"`），开窗前解析并安装，
+  首帧就是上次的主题；`TELA_THEME` 可临时覆盖、`TELA_THEMES_DIR` 可换主题目录；
+- GUI 把 `TelaTheme` 装成 GPUI Global（`tela-ui::gui::theme`），视图用
+  `cx.tela_theme()` 按帧读取；切换时 `install` 后显式 `notify` 外壳与阅读面板；
+- 图标是 Lucide 名字（`gpui_kit::assets::AllAssets`，按 SVG 文件名建索引），
+  找不到时回退成文字/glyph；图标颜色跟随控件，不写进主题；
+- 阅读正文的字体、字号、行高、段落间距、标题层级、链接/代码/引用/选区颜色都由
+  `TextViewStyle` 从主题推导（`gui/reader.rs::text_style`）；
+- 主题是**设备本地设置**，不参与同步；`ui.theme` 若将来进入 `prefs` 行，
+  只作为跨设备默认值，本机仍以 `ui.toml` 优先。
 
 ```rust
 pub struct TelaTheme {
-    pub paper: Hsla, pub surface: Hsla, pub ink: Hsla, pub body: Hsla,
-    pub ink_2: Hsla, pub muted: Hsla, pub line: Hsla, pub hover: Hsla,
-    pub accent: Hsla, pub highlight: Hsla, pub danger: Hsla,
+    pub id: String, pub name: String, pub appearance: Appearance,
+    pub icons: IconSet,          // feed / bookmark / article / recommendation / button / …
+    pub typography: Typography,  // ui/body/heading/mono 字体、字号、行高、段落间距
+    pub colors: Palette,         // 界面底色 + 正文标题/链接/代码/引用/选区色
+    pub borders: Borders,        // border / divider / focus
+    pub source: ThemeSource,     // 内置 or 本机文件
 }
 ```
+
+字段与文件格式见 [`docs/themes.md`](./themes.md)。
 
 ### 9.7 无障碍
 

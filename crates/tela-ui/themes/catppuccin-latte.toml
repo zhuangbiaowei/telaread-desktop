@@ -1,0 +1,51 @@
+# Catppuccin Latte（浅色）。
+#
+# 复制这个文件到 <数据目录>/themes/<id>.toml 就能改成自己的主题；
+# 文件名（不含 .toml）就是主题 id。
+
+name = "Catppuccin Latte"
+appearance = "light"
+
+[icons]
+feed = "rss"
+bookmark = "bookmark"
+article = "file-text"
+recommendation = "star"
+button = "sparkles"
+external = "external-link"
+cache = "download"
+add = "plus"
+remove = "circle-x"
+theme = "palette"
+
+[typography]
+mono_font = "monospace"
+body_size = 17.0
+line_height = 1.75
+paragraph_gap = 0.55
+heading_scale = 1.0
+
+[colors]
+background = "#eff1f5"
+sidebar = "#e6e9ef"
+surface = "#ffffff"
+text = "#4c4f69"
+muted = "#8c8fa1"
+subtle = "#6c6f85"
+accent = "#1e66f5"
+danger = "#d20f39"
+warning = "#df8e1d"
+heading = "#4c4f69"
+link = "#1e66f5"
+code_text = "#4c4f69"
+code_background = "#e6e9ef"
+quote = "#6c6f85"
+selection = "#1e66f555"
+hover = "#dce0e8"
+selected = "#ccd0da"
+on_accent = "#eff1f5"
+
+[borders]
+border = "#ccd0da"
+divider = "#ccd0da"
+focus = "#1e66f5"

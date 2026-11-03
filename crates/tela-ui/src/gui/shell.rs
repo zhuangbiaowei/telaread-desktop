@@ -13,11 +13,13 @@ use tela_proto::TelaError;
 use crate::account::{AccountMode, AccountService, AccountStatus, LoginPhase, LoginTicket};
 use crate::gui::bookmark::{BookmarkDialogEvent, BookmarkDialogView};
 use crate::gui::reader::{ReaderEvent, ReaderView};
+use crate::gui::theme::{ActiveTelaTheme as _, hsla, icon_element};
 use crate::shell::{
     ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheProgress, OfflineCacheReport,
     OfflineCacheService, RecommendationItem, RecommendationService, ShellData, ShellSection,
     ShellViewModel,
 };
+use crate::theme::{TelaTheme, ThemeCatalog, ThemeColor};
 
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,17 +27,6 @@ use gpui_kit::*;
 
 /// 左上角品牌文字点击后打开的 TelaRead 主页。
 pub const HOME_URL: &str = "https://telaread.com";
-
-const BG: u32 = 0x11111b;
-const SIDEBAR: u32 = 0x181825;
-const PANEL: u32 = 0x1e1e2e;
-const BORDER: u32 = 0x313244;
-const TEXT: u32 = 0xcdd6f4;
-const MUTED: u32 = 0x6c7086;
-const SUBTLE: u32 = 0xa6adc8;
-const ACCENT: u32 = 0x89b4fa;
-const DANGER: u32 = 0xf38ba8;
-const WARN: u32 = 0xf9e2af;
 
 /// 三栏外壳视图：左订阅、中文章、右阅读面板。
 pub struct ShellView {
@@ -82,6 +73,12 @@ pub struct ShellView {
     recommendation_scroll: ScrollHandle,
     /// “我的收藏”列表的滚动句柄：`j/k` 切换收藏项时让列表跟着滚。
     bookmark_scroll: ScrollHandle,
+    /// 可用主题 + 当前选择；主题选择器从这里取列表。
+    themes: ThemeCatalog,
+    /// 主题选择器是否打开（窗口内模态覆盖层）。
+    theme_picker_open: bool,
+    /// 一次主题操作的结果/错误提示。
+    theme_notice: Option<String>,
     /// 阅读面板的推荐事件订阅；必须保活。
     _reader_subscription: Subscription,
 }
@@ -147,6 +144,33 @@ impl ShellView {
         bookmarks: Option<Arc<dyn BookmarkService>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_with_theme_catalog(
+            data,
+            content,
+            accounts,
+            offline_cache,
+            recommendations,
+            bookmarks,
+            ThemeCatalog::builtin(),
+            cx,
+        )
+    }
+
+    /// 完整装配 + 主题目录（真实 GUI）：构造时安装当前主题的全局值。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_theme_catalog(
+        data: Arc<dyn ShellData>,
+        content: Arc<dyn ContentApi>,
+        accounts: Option<Arc<dyn AccountService>>,
+        offline_cache: Option<Arc<dyn OfflineCacheService>>,
+        recommendations: Option<Arc<dyn RecommendationService>>,
+        bookmarks: Option<Arc<dyn BookmarkService>>,
+        themes: ThemeCatalog,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // 直接构造视图（测试、其他宿主）时也保证全局主题与目录一致；
+        // 真实入口在开窗前已经安装过，这里只是幂等地再设置一次。
+        crate::gui::theme::install(cx, themes.active().clone());
         let reader = cx.new(|cx| {
             ReaderView::new_with_recommendations(
                 data.clone(),
@@ -197,6 +221,9 @@ impl ShellView {
             article_scroll: ScrollHandle::new(),
             recommendation_scroll: ScrollHandle::new(),
             bookmark_scroll: ScrollHandle::new(),
+            themes,
+            theme_picker_open: false,
+            theme_notice: None,
             _reader_subscription,
         };
         view.sync_reader(cx);
@@ -236,6 +263,99 @@ impl ShellView {
     /// 内容 API 句柄（诊断/后续设置页用）。
     pub fn content(&self) -> Arc<dyn ContentApi> {
         Arc::clone(&self.content)
+    }
+
+    /// 当前主题目录/选择器数据（测试与诊断用）。
+    pub fn themes(&self) -> &ThemeCatalog {
+        &self.themes
+    }
+
+    /// 当前主题 id（测试用；渲染时以全局主题为准）。
+    pub fn active_theme_id(&self) -> &str {
+        self.themes.active_id()
+    }
+
+    /// 主题选择器是否打开。
+    pub fn theme_picker_open(&self) -> bool {
+        self.theme_picker_open
+    }
+
+    /// 最近一次主题操作的提示。
+    pub fn theme_notice(&self) -> Option<&str> {
+        self.theme_notice.as_deref()
+    }
+
+    /// 打开主题选择器；每次打开都重扫主题目录，方便边改文件边看效果。
+    pub fn open_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.themes.reload();
+        self.sync_installed_theme(cx);
+        self.theme_notice = None;
+        self.theme_picker_open = true;
+        // 遮罩层没有输入框，焦点仍在阅读面板：显式锁住它的 o/c/t 与翻页键。
+        self.reader
+            .update(cx, |reader, _| reader.set_input_locked(true));
+        cx.notify();
+    }
+
+    /// 关闭主题选择器。
+    pub fn close_theme_picker(&mut self, cx: &mut Context<Self>) {
+        self.theme_picker_open = false;
+        self.reader
+            .update(cx, |reader, _| reader.set_input_locked(false));
+        cx.notify();
+    }
+
+    /// 重新扫描本机主题目录。
+    pub fn refresh_themes(&mut self, cx: &mut Context<Self>) {
+        self.themes.reload();
+        self.sync_installed_theme(cx);
+        let count = self.themes.themes().len();
+        self.theme_notice = Some(if self.themes.issues().is_empty() {
+            format!("已重新扫描：共 {count} 个主题")
+        } else {
+            format!(
+                "已重新扫描：共 {count} 个主题，{} 个文件有问题",
+                self.themes.issues().len()
+            )
+        });
+        cx.notify();
+    }
+
+    /// 主题目录重新扫描后，让全局主题回到目录里的当前选择。
+    ///
+    /// 覆盖两种情况：当前主题文件被删（退回默认主题）、主题内容被改
+    /// （同 id 但颜色/字体变了）。
+    fn sync_installed_theme(&mut self, cx: &mut Context<Self>) {
+        let active = self.themes.active().clone();
+        if *cx.tela_theme() == active {
+            return;
+        }
+        crate::gui::theme::install(cx, active);
+        self.reader.update(cx, |_, cx| cx.notify());
+    }
+
+    /// 应用一个主题：写全局、存本地选择、让阅读面板重绘。
+    ///
+    /// 返回是否成功；主题 id 不存在时保持当前主题并给出提示。
+    pub fn apply_theme(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(theme) = self.themes.select(id) else {
+            self.theme_notice = Some(format!("找不到主题「{id}」"));
+            cx.notify();
+            return false;
+        };
+        let theme = theme.clone();
+        crate::gui::theme::install(cx, theme.clone());
+        self.theme_notice = match self.themes.persist_active() {
+            Ok(()) => Some(format!("已切换到「{}」", theme.name)),
+            Err(error) => Some(format!(
+                "已切换到「{}」，但保存选择失败：{error}",
+                theme.name
+            )),
+        };
+        // 主题全局变了，阅读面板不会自动知道；显式让它重绘。
+        self.reader.update(cx, |_, cx| cx.notify());
+        cx.notify();
+        true
     }
 
     /// 打开 TelaRead 主页失败时的提示（测试/诊断用）。
@@ -717,8 +837,11 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        // 弹窗是模态的：输入网址/推荐语时外壳不应抢 j/k。
-        if self.bookmark_dialog.is_some() || self.reader.read(cx).recommend_dialog_open() {
+        // 弹窗是模态的：输入网址/推荐语/选择主题时外壳不应抢 j/k。
+        if self.theme_picker_open
+            || self.bookmark_dialog.is_some()
+            || self.reader.read(cx).recommend_dialog_open()
+        {
             return false;
         }
         match (key.to_ascii_lowercase().as_str(), shift) {
@@ -840,11 +963,12 @@ impl ShellView {
     }
 
     /// 侧栏底部的账号面板：登录 / 等待授权 / 退出。
-    fn account_panel(&self, cx: &mut Context<Self>) -> Div {
+    fn account_panel(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
+        let colors = &theme.colors;
         let mut panel = v_flex().gap_2().child(
             div()
                 .text_xs()
-                .text_color(rgb(SUBTLE))
+                .text_color(hsla(colors.subtle))
                 .child(self.account.label()),
         );
 
@@ -852,7 +976,7 @@ impl ShellView {
             panel = panel.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(WARN))
+                    .text_color(hsla(colors.warning))
                     .child("缺少 TELA_CLIENT_ID：设置环境变量后重启，或用 --demo 进入演示模式"),
             );
         }
@@ -860,7 +984,7 @@ impl ShellView {
             panel = panel.child(
                 div()
                     .text_xs()
-                    .text_color(rgb(DANGER))
+                    .text_color(hsla(colors.danger))
                     .child(format!("凭据库：{error}")),
             );
         }
@@ -874,43 +998,61 @@ impl ShellView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(hsla(colors.muted))
                                     .truncate()
                                     .child(format!("库 {}", self.account.db_path)),
                             )
                             .child(
-                                div()
+                                h_flex()
                                     .id("account-logout")
                                     .role(Role::Button)
                                     .aria_label("退出登录")
                                     .px_2()
                                     .py_1()
+                                    .gap_1()
+                                    .items_center()
                                     .rounded_md()
                                     .cursor_pointer()
                                     .border_1()
-                                    .border_color(rgb(DANGER))
+                                    .border_color(hsla(colors.danger))
                                     .text_xs()
-                                    .text_color(rgb(DANGER))
-                                    .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+                                    .text_color(hsla(colors.danger))
+                                    .hover(|style| {
+                                        style
+                                            .bg(hsla(colors.danger))
+                                            .text_color(hsla(colors.background))
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| this.logout(cx)))
+                                    .child(icon_element(
+                                        &theme.icons.button,
+                                        hsla(colors.danger),
+                                        px(12.),
+                                    ))
                                     .child("退出"),
                             ),
                     );
                 } else if self.account.mode == AccountMode::Real {
                     panel = panel.child(
-                        div()
+                        h_flex()
                             .id("account-login")
                             .role(Role::Button)
                             .aria_label("登录 Tela")
                             .px_2()
                             .py_1()
+                            .gap_1()
+                            .items_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .bg(rgb(ACCENT))
-                            .text_color(rgb(BG))
+                            .bg(hsla(colors.accent))
+                            .text_color(hsla(colors.on_accent))
                             .text_xs()
                             .font_weight(FontWeight::SEMIBOLD)
                             .on_click(cx.listener(|this, _, _, cx| this.start_login(cx)))
+                            .child(icon_element(
+                                &theme.icons.button,
+                                hsla(colors.on_accent),
+                                px(12.),
+                            ))
                             .child("登录 Tela"),
                     );
                 }
@@ -920,13 +1062,13 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(ACCENT))
+                            .text_color(hsla(colors.accent))
                             .child("等待浏览器授权…"),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .truncate()
                             .child(ticket.auth_url.clone()),
                     )
@@ -942,8 +1084,8 @@ impl ShellView {
                                     .py_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(rgb(ACCENT))
-                                    .text_color(rgb(BG))
+                                    .bg(hsla(colors.accent))
+                                    .text_color(hsla(colors.on_accent))
                                     .text_xs()
                                     .on_click(cx.listener(|this, _, _, cx| this.open_auth_page(cx)))
                                     .child("打开"),
@@ -958,9 +1100,9 @@ impl ShellView {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(hsla(theme.borders.border))
                                     .text_xs()
-                                    .text_color(rgb(SUBTLE))
+                                    .text_color(hsla(colors.subtle))
                                     .on_click(cx.listener(|this, _, _, cx| this.copy_auth_link(cx)))
                                     .child("复制链接"),
                             )
@@ -974,7 +1116,7 @@ impl ShellView {
                                     .rounded_md()
                                     .cursor_pointer()
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(hsla(colors.muted))
                                     .on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx)))
                                     .child("取消"),
                             ),
@@ -982,27 +1124,44 @@ impl ShellView {
             }
             LoginPhase::Error(error) => {
                 panel = panel
-                    .child(div().text_xs().text_color(rgb(DANGER)).child(error.clone()))
                     .child(
                         div()
+                            .text_xs()
+                            .text_color(hsla(colors.danger))
+                            .child(error.clone()),
+                    )
+                    .child(
+                        h_flex()
                             .id("account-retry-login")
                             .role(Role::Button)
                             .aria_label("重试登录")
                             .px_2()
                             .py_1()
+                            .gap_1()
+                            .items_center()
                             .rounded_md()
                             .cursor_pointer()
-                            .bg(rgb(ACCENT))
-                            .text_color(rgb(BG))
+                            .bg(hsla(colors.accent))
+                            .text_color(hsla(colors.on_accent))
                             .text_xs()
                             .on_click(cx.listener(|this, _, _, cx| this.start_login(cx)))
+                            .child(icon_element(
+                                &theme.icons.button,
+                                hsla(colors.on_accent),
+                                px(12.),
+                            ))
                             .child("重试登录"),
                     );
             }
         }
 
         if let Some(notice) = &self.account_notice {
-            panel = panel.child(div().text_xs().text_color(rgb(MUTED)).child(notice.clone()));
+            panel = panel.child(
+                div()
+                    .text_xs()
+                    .text_color(hsla(colors.muted))
+                    .child(notice.clone()),
+            );
         }
         panel
     }
@@ -1143,20 +1302,21 @@ impl ShellView {
         cx.notify();
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
+        let colors = &theme.colors;
         v_flex()
             .w(px(260.))
             .h_full()
-            .bg(rgb(SIDEBAR))
+            .bg(hsla(colors.sidebar))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .child(
                 v_flex()
                     .p_4()
                     .gap_1()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(hsla(theme.borders.divider))
                     .child(
                         h_flex()
                             .items_center()
@@ -1172,7 +1332,7 @@ impl ShellView {
                                     .py_1()
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(PANEL)))
+                                    .hover(|style| style.bg(hsla(colors.hover)))
                                     .on_click(cx.listener(|this, _, _, cx| this.open_home(cx)))
                                     .child(
                                         div()
@@ -1180,50 +1340,113 @@ impl ShellView {
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .child("TelaRead"),
                                     )
-                                    .child(div().text_xs().text_color(rgb(MUTED)).child("↗")),
+                                    .child(icon_element(
+                                        &theme.icons.external,
+                                        hsla(colors.muted),
+                                        px(12.),
+                                    )),
                             )
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(hsla(colors.muted))
                                     .child("本地优先阅读器"),
                             ),
                     )
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(SUBTLE))
+                            .text_color(hsla(colors.subtle))
                             .child(model.status_line()),
                     )
                     .when_some(self.home_notice.clone(), |element, notice| {
-                        element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                        element.child(
+                            div()
+                                .text_xs()
+                                .text_color(hsla(colors.warning))
+                                .child(notice),
+                        )
                     })
                     .when_some(self.cache_notice.clone(), |element, notice| {
-                        element.child(div().text_xs().text_color(rgb(MUTED)).child(notice))
+                        element.child(div().text_xs().text_color(hsla(colors.muted)).child(notice))
                     }),
             )
-            .child(self.recommendations_entry(cx))
-            .child(self.bookmarks_entry(cx))
-            .child(self.feed_list(cx))
+            .child(self.recommendations_entry(theme, cx))
+            .child(self.bookmarks_entry(theme, cx))
+            .child(self.feed_list(theme, cx))
             .child(
                 v_flex()
                     .p_3()
                     .gap_1()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child(format!(
-                        "{} 个订阅 · {} 篇未读",
-                        model.feeds.len(),
-                        model.unread_total()
-                    )))
-                    .child(self.account_panel(cx)),
+                    .border_color(hsla(theme.borders.divider))
+                    .child(self.theme_entry(theme, cx))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(hsla(colors.muted))
+                            .child(format!(
+                                "{} 个订阅 · {} 篇未读",
+                                model.feeds.len(),
+                                model.unread_total()
+                            )),
+                    )
+                    .child(self.account_panel(theme, cx)),
+            )
+    }
+
+    /// 侧栏底部的主题入口：显示当前主题名，点击打开选择器。
+    fn theme_entry(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.themes.active();
+        let label = format!("主题 · {}", current.name);
+        h_flex()
+            .id("theme-open")
+            .role(Role::Button)
+            .aria_label(format!("选择主题，当前 {}", current.name))
+            .px_2()
+            .py_1()
+            .gap_2()
+            .items_center()
+            .justify_between()
+            .rounded_md()
+            .cursor_pointer()
+            .border_1()
+            .border_color(hsla(theme.borders.border))
+            .hover(|style| style.bg(hsla(theme.colors.hover)))
+            .on_click(cx.listener(|this, _, _, cx| this.open_theme_picker(cx)))
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(icon_element(
+                        &theme.icons.theme,
+                        hsla(theme.colors.accent),
+                        px(14.),
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(hsla(theme.colors.subtle))
+                            .truncate()
+                            .child(label),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hsla(theme.colors.muted))
+                    .child("切换"),
             )
     }
 
     /// 侧栏的“我的推荐”入口：显示全部推荐过的文章数量。
-    fn recommendations_entry(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn recommendations_entry(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.model.section == ShellSection::Recommendations;
         let count = self.model.recommendations.len();
+        let colors = &theme.colors;
         h_flex()
             .id("sidebar-recommendations")
             .role(Role::Button)
@@ -1238,9 +1461,9 @@ impl ShellView {
             .justify_between()
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(selected, |element| element.bg(hsla(colors.selected)))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(rgb(PANEL)))
+                element.hover(|style| style.bg(hsla(colors.hover)))
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 if this.show_recommendations(cx) {
@@ -1248,27 +1471,47 @@ impl ShellView {
                 }
             }))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .child("我的推荐"),
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(icon_element(
+                        &theme.icons.recommendation,
+                        hsla(if selected {
+                            colors.accent
+                        } else {
+                            colors.muted
+                        }),
+                        px(14.),
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .child("我的推荐"),
+                    ),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                    .text_color(hsla(if selected {
+                        colors.accent
+                    } else {
+                        colors.muted
+                    }))
                     .child(count.to_string()),
             )
     }
 
     /// 侧栏的“我的收藏”入口：显示本地收藏数量。
-    fn bookmarks_entry(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn bookmarks_entry(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.model.section == ShellSection::Bookmarks;
         let count = self.model.bookmarks.len();
+        let colors = &theme.colors;
         h_flex()
             .id("sidebar-bookmarks")
             .role(Role::Button)
@@ -1282,9 +1525,9 @@ impl ShellView {
             .justify_between()
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(selected, |element| element.bg(hsla(colors.selected)))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(rgb(PANEL)))
+                element.hover(|style| style.bg(hsla(colors.hover)))
             })
             .on_click(cx.listener(|this, _, _, cx| {
                 if this.show_bookmarks(cx) {
@@ -1292,24 +1535,43 @@ impl ShellView {
                 }
             }))
             .child(
-                div()
-                    .text_sm()
-                    .font_weight(if selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    })
-                    .child("我的收藏"),
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .items_center()
+                    .child(icon_element(
+                        &theme.icons.bookmark,
+                        hsla(if selected {
+                            colors.accent
+                        } else {
+                            colors.muted
+                        }),
+                        px(14.),
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
+                            })
+                            .child("我的收藏"),
+                    ),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(if selected { ACCENT } else { MUTED }))
+                    .text_color(hsla(if selected {
+                        colors.accent
+                    } else {
+                        colors.muted
+                    }))
                     .child(count.to_string()),
             )
     }
 
-    fn feed_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn feed_list(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> impl IntoElement {
         let model = &self.model;
         let mut list = v_flex()
             .id("feed-list")
@@ -1321,14 +1583,14 @@ impl ShellView {
             .gap_1();
 
         if let Some(error) = &model.feeds_error {
-            return list.child(Self::inline_error("订阅列表加载失败", error));
+            return list.child(Self::inline_error("订阅列表加载失败", error, theme));
         }
         if model.feeds.is_empty() {
-            return list.child(Self::sidebar_empty());
+            return list.child(Self::sidebar_empty(theme));
         }
 
         for feed in &model.feeds {
-            list = list.child(self.feed_row(feed, model.selected_feed, cx));
+            list = list.child(self.feed_row(feed, model.selected_feed, theme, cx));
         }
         list
     }
@@ -1337,11 +1599,13 @@ impl ShellView {
         &self,
         feed: &FeedItem,
         selected: Option<i64>,
+        theme: &TelaTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let feed_id = feed.id;
+        let colors = &theme.colors;
         let is_selected = self.model.section == ShellSection::Feed && selected == Some(feed.id);
-        let cache_button = self.cache_button(feed, cx);
+        let cache_button = self.cache_button(feed, theme, cx);
         v_flex()
             .id(("feed", feed.id as u64))
             .role(Role::Button)
@@ -1353,9 +1617,9 @@ impl ShellView {
             .py_2()
             .rounded_md()
             .cursor_pointer()
-            .when(is_selected, |element| element.bg(rgb(BORDER)))
+            .when(is_selected, |element| element.bg(hsla(colors.selected)))
             .when(!is_selected, |element| {
-                element.hover(|style| style.bg(rgb(PANEL)))
+                element.hover(|style| style.bg(hsla(colors.hover)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.select_feed(feed_id, cx) {
@@ -1368,17 +1632,33 @@ impl ShellView {
                     .justify_between()
                     .gap_2()
                     .child(
-                        div()
+                        h_flex()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .font_weight(if is_selected {
-                                FontWeight::SEMIBOLD
-                            } else {
-                                FontWeight::MEDIUM
-                            })
-                            .truncate()
-                            .child(feed.title.clone()),
+                            .gap_2()
+                            .items_center()
+                            .child(icon_element(
+                                &theme.icons.feed,
+                                hsla(if is_selected {
+                                    colors.accent
+                                } else {
+                                    colors.muted
+                                }),
+                                px(14.),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(if is_selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::MEDIUM
+                                    })
+                                    .truncate()
+                                    .child(feed.title.clone()),
+                            ),
                     )
                     // 离线缓存按钮：博客名右侧，点一次缓存该订阅全部原文与译文。
                     .child(cache_button)
@@ -1387,7 +1667,7 @@ impl ShellView {
                             div()
                                 .text_xs()
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(ACCENT))
+                                .text_color(hsla(colors.accent))
                                 .child(feed.unread.to_string()),
                         )
                     }),
@@ -1395,38 +1675,48 @@ impl ShellView {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .truncate()
                     .child(feed.feed_url.clone()),
             )
     }
 
     /// 博客名右侧的离线缓存按钮。
-    fn cache_button(&self, feed: &FeedItem, cx: &mut Context<Self>) -> AnyElement {
+    fn cache_button(
+        &self,
+        feed: &FeedItem,
+        theme: &TelaTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let feed_id = feed.id;
+        let colors = &theme.colors;
         let progress = self.cache_progress.get(&feed_id);
         let running = progress.is_some_and(OfflineCacheProgress::is_running);
         let (label, color) = match progress {
-            Some(progress) if !progress.finished => (progress.button_label(), ACCENT),
-            Some(progress) if progress.failed > 0 => (progress.button_label(), DANGER),
-            Some(progress) if progress.pending > 0 => (progress.button_label(), WARN),
-            Some(progress) => (progress.button_label(), SUBTLE),
-            None => ("缓存".to_string(), MUTED),
+            Some(progress) if !progress.finished => (progress.button_label(), colors.accent),
+            Some(progress) if progress.failed > 0 => (progress.button_label(), colors.danger),
+            Some(progress) if progress.pending > 0 => (progress.button_label(), colors.warning),
+            Some(progress) => (progress.button_label(), colors.subtle),
+            None => ("缓存".to_string(), colors.muted),
         };
-        div()
+        h_flex()
             .id(("feed-cache", feed_id as u64))
             .role(Role::Button)
             .aria_label(format!("离线缓存「{}」的原文与译文", feed.title))
             .px_1()
             .py_1()
+            .gap_1()
+            .items_center()
             .rounded_sm()
             .text_xs()
-            .text_color(rgb(color))
-            .when(running, |element| element.bg(rgb(BORDER)))
+            .text_color(hsla(color))
+            .when(running, |element| element.bg(hsla(colors.selected)))
             .when(!running, |element| {
-                element
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+                element.cursor_pointer().hover(|style| {
+                    style
+                        .bg(hsla(colors.selected))
+                        .text_color(hsla(colors.accent))
+                })
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 // 按钮嵌在整行“选中订阅”的可点击区域里，必须阻止事件冒泡，
@@ -1434,11 +1724,12 @@ impl ShellView {
                 cx.stop_propagation();
                 this.cache_feed(feed_id, cx);
             }))
+            .child(icon_element(&theme.icons.cache, hsla(color), px(12.)))
             .child(label)
             .into_any_element()
     }
 
-    fn sidebar_empty() -> Div {
+    fn sidebar_empty(theme: &TelaTheme) -> Div {
         v_flex()
             .p_4()
             .gap_2()
@@ -1452,48 +1743,50 @@ impl ShellView {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(theme.colors.muted))
                     .child("同步接入后，这里会出现订阅与文章。"),
             )
     }
 
-    fn main_panel(&self, cx: &mut Context<Self>) -> Div {
+    fn main_panel(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
+        let background = hsla(theme.colors.background);
         if model.section == ShellSection::Feed {
             if let Some(error) = &model.feeds_error {
                 return h_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .bg(rgb(BG))
-                    .child(Self::full_page_error("无法加载订阅", error));
+                    .bg(background)
+                    .child(Self::full_page_error("无法加载订阅", error, theme));
             }
             if model.is_empty() {
                 return h_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .bg(rgb(BG))
-                    .child(Self::full_page_empty());
+                    .bg(background)
+                    .child(Self::full_page_empty(theme));
             }
         }
 
         let middle = match model.section {
-            ShellSection::Feed => self.article_pane(cx),
-            ShellSection::Recommendations => self.recommendation_pane(cx),
-            ShellSection::Bookmarks => self.bookmark_pane(cx),
+            ShellSection::Feed => self.article_pane(theme, cx),
+            ShellSection::Recommendations => self.recommendation_pane(theme, cx),
+            ShellSection::Bookmarks => self.bookmark_pane(theme, cx),
         };
         h_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .bg(rgb(BG))
+            .bg(background)
             .child(middle)
             .child(self.reader_pane())
     }
 
-    fn article_pane(&self, cx: &mut Context<Self>) -> Div {
+    fn article_pane(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
+        let colors = &theme.colors;
         let title = model
             .selected_feed_item()
             .map(|feed| feed.title.clone())
@@ -1510,7 +1803,7 @@ impl ShellView {
             .gap_1();
 
         if let Some(error) = &model.articles_error {
-            list = list.child(Self::inline_error("文章列表加载失败", error));
+            list = list.child(Self::inline_error("文章列表加载失败", error, theme));
         } else if model.articles.is_empty() {
             list = list.child(
                 v_flex()
@@ -1521,29 +1814,34 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child("同步完成后，文章会出现在这里。"),
                     ),
             );
         } else {
             for article in &model.articles {
-                list = list.child(Self::article_row(article, model.selected_article, cx));
+                list = list.child(Self::article_row(
+                    article,
+                    model.selected_article,
+                    theme,
+                    cx,
+                ));
             }
         }
 
         v_flex()
             .w(px(340.))
             .h_full()
-            .bg(rgb(PANEL))
+            .bg(hsla(colors.surface))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .child(
                 h_flex()
                     .p_4()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(hsla(theme.borders.divider))
                     .child(
                         div()
                             .text_sm()
@@ -1554,7 +1852,7 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child(format!("{count} 篇")),
                     ),
             )
@@ -1562,8 +1860,9 @@ impl ShellView {
     }
 
     /// 中间栏的“我的推荐”列表：标题、博客、推荐日期、推荐语与取消按钮。
-    fn recommendation_pane(&self, cx: &mut Context<Self>) -> Div {
+    fn recommendation_pane(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
+        let colors = &theme.colors;
         let count = model.recommendations.len();
 
         let mut list = v_flex()
@@ -1576,7 +1875,7 @@ impl ShellView {
             .gap_1();
 
         if let Some(error) = &model.recommendations_error {
-            list = list.child(Self::inline_error("推荐列表加载失败", error));
+            list = list.child(Self::inline_error("推荐列表加载失败", error, theme));
         } else if model.recommendations.is_empty() {
             list = list.child(
                 v_flex()
@@ -1587,29 +1886,29 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child("打开一篇文章，点右上角的「推荐」写下推荐理由。"),
                     ),
             );
         } else {
             for item in &model.recommendations {
-                list = list.child(self.recommendation_row(item, cx));
+                list = list.child(self.recommendation_row(item, theme, cx));
             }
         }
 
         v_flex()
             .w(px(360.))
             .h_full()
-            .bg(rgb(PANEL))
+            .bg(hsla(colors.surface))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .child(
                 h_flex()
                     .p_4()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(hsla(theme.borders.divider))
                     .child(
                         div()
                             .text_sm()
@@ -1619,7 +1918,7 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child(format!("{count} 篇")),
                     ),
             )
@@ -1629,7 +1928,7 @@ impl ShellView {
                         .px_4()
                         .pt_2()
                         .text_xs()
-                        .text_color(rgb(SUBTLE))
+                        .text_color(hsla(colors.subtle))
                         .child(notice),
                 )
             })
@@ -1639,9 +1938,11 @@ impl ShellView {
     fn recommendation_row(
         &self,
         item: &RecommendationItem,
+        theme: &TelaTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let article_id = item.article_id;
+        let colors = &theme.colors;
         let selected = self.model.section == ShellSection::Recommendations
             && self.model.selected_recommendation == Some(article_id);
         v_flex()
@@ -1655,9 +1956,9 @@ impl ShellView {
             .py_2()
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(selected, |element| element.bg(hsla(colors.selected)))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(rgb(SIDEBAR)))
+                element.hover(|style| style.bg(hsla(colors.sidebar)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.select_recommendation(article_id, cx) {
@@ -1670,20 +1971,36 @@ impl ShellView {
                     .justify_between()
                     .gap_2()
                     .child(
-                        div()
+                        h_flex()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(item.title.clone()),
+                            .gap_2()
+                            .items_center()
+                            .child(icon_element(
+                                &theme.icons.recommendation,
+                                hsla(if selected {
+                                    colors.accent
+                                } else {
+                                    colors.muted
+                                }),
+                                px(12.),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(item.title.clone()),
+                            ),
                     )
-                    .child(self.cancel_recommendation_button(article_id, cx)),
+                    .child(self.cancel_recommendation_button(article_id, theme, cx)),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .truncate()
                     .child(format!("{} · {}", item.feed_title, item.created_label())),
             )
@@ -1691,36 +2008,54 @@ impl ShellView {
                 element.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(SUBTLE))
+                        .text_color(hsla(colors.subtle))
                         .child(format!("“{note}”")),
                 )
             })
     }
 
     /// 推荐行右侧的“取消推荐”按钮；阻止事件冒泡，避免顺带打开文章。
-    fn cancel_recommendation_button(&self, article_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        div()
+    fn cancel_recommendation_button(
+        &self,
+        article_id: i64,
+        theme: &TelaTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = &theme.colors;
+        h_flex()
             .id(("recommendation-cancel", article_id as u64))
             .role(Role::Button)
             .aria_label("取消推荐")
             .px_2()
             .py_1()
+            .gap_1()
+            .items_center()
             .rounded_md()
             .text_xs()
-            .text_color(rgb(DANGER))
+            .text_color(hsla(colors.danger))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .hover(|style| {
+                style
+                    .bg(hsla(colors.danger))
+                    .text_color(hsla(colors.background))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.cancel_recommendation(article_id, cx);
             }))
+            .child(icon_element(
+                &theme.icons.remove,
+                hsla(colors.danger),
+                px(12.),
+            ))
             .child("取消")
             .into_any_element()
     }
 
     /// 中间栏的“我的收藏”列表：标题、站点、收藏日期、图片数与移除按钮。
-    fn bookmark_pane(&self, cx: &mut Context<Self>) -> Div {
+    fn bookmark_pane(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         let model = &self.model;
+        let colors = &theme.colors;
         let count = model.bookmarks.len();
 
         let mut list = v_flex()
@@ -1733,7 +2068,7 @@ impl ShellView {
             .gap_1();
 
         if let Some(error) = &model.bookmarks_error {
-            list = list.child(Self::inline_error("收藏列表加载失败", error));
+            list = list.child(Self::inline_error("收藏列表加载失败", error, theme));
         } else if model.bookmarks.is_empty() {
             list = list.child(
                 v_flex()
@@ -1744,29 +2079,29 @@ impl ShellView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child("按 Shift+B 输入一个网址，Tela 会下载正文、标题和图片。"),
                     ),
             );
         } else {
             for item in &model.bookmarks {
-                list = list.child(self.bookmark_row(item, cx));
+                list = list.child(self.bookmark_row(item, theme, cx));
             }
         }
 
         v_flex()
             .w(px(360.))
             .h_full()
-            .bg(rgb(PANEL))
+            .bg(hsla(colors.surface))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .child(
                 h_flex()
                     .p_4()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(hsla(theme.borders.divider))
                     .child(
                         div()
                             .text_sm()
@@ -1780,28 +2115,39 @@ impl ShellView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(hsla(colors.muted))
                                     .child(format!("{count} 篇")),
                             )
                             // 除了 Shift+B，也给一个可见入口：新用户不必先记住快捷键。
                             .child(
-                                div()
+                                h_flex()
                                     .id("bookmark-add")
                                     .role(Role::Button)
                                     .aria_label("收藏一个网址（Shift+B）")
                                     .px_2()
                                     .py_1()
+                                    .gap_1()
+                                    .items_center()
                                     .rounded_md()
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(hsla(theme.borders.border))
                                     .text_xs()
-                                    .text_color(rgb(SUBTLE))
+                                    .text_color(hsla(colors.subtle))
                                     .cursor_pointer()
-                                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+                                    .hover(|style| {
+                                        style
+                                            .bg(hsla(colors.selected))
+                                            .text_color(hsla(colors.accent))
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_bookmark_dialog(window, cx);
                                     }))
-                                    .child("＋ 收藏"),
+                                    .child(icon_element(
+                                        &theme.icons.add,
+                                        hsla(colors.subtle),
+                                        px(12.),
+                                    ))
+                                    .child("收藏"),
                             ),
                     ),
             )
@@ -1811,15 +2157,22 @@ impl ShellView {
                         .px_4()
                         .pt_2()
                         .text_xs()
-                        .text_color(rgb(SUBTLE))
+                        .text_color(hsla(colors.subtle))
                         .child(notice),
                 )
             })
             .child(list)
     }
 
-    fn bookmark_row(&self, item: &BookmarkItem, cx: &mut Context<Self>) -> impl IntoElement {
+    fn bookmark_row(
+        &self,
+        item: &BookmarkItem,
+        theme: &TelaTheme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let bookmark_id = item.id;
+        let colors = &theme.colors;
+        let url = item.url.clone();
         let selected = self.model.section == ShellSection::Bookmarks
             && self.model.selected_bookmark == Some(bookmark_id);
         v_flex()
@@ -1833,9 +2186,9 @@ impl ShellView {
             .py_2()
             .rounded_md()
             .cursor_pointer()
-            .when(selected, |element| element.bg(rgb(BORDER)))
+            .when(selected, |element| element.bg(hsla(colors.selected)))
             .when(!selected, |element| {
-                element.hover(|style| style.bg(rgb(SIDEBAR)))
+                element.hover(|style| style.bg(hsla(colors.sidebar)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.select_bookmark(bookmark_id, cx) {
@@ -1848,45 +2201,82 @@ impl ShellView {
                     .justify_between()
                     .gap_2()
                     .child(
-                        div()
+                        h_flex()
                             .flex_1()
                             .min_w_0()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .truncate()
-                            .child(item.title.clone()),
+                            .gap_2()
+                            .items_center()
+                            .child(icon_element(
+                                &theme.icons.bookmark,
+                                hsla(if selected {
+                                    colors.accent
+                                } else {
+                                    colors.muted
+                                }),
+                                px(12.),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(item.title.clone()),
+                            ),
                     )
-                    .child(self.remove_bookmark_button(bookmark_id, cx)),
+                    .child(self.remove_bookmark_button(bookmark_id, theme, cx)),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .truncate()
                     .child(item.meta_label()),
             )
-            .when_some(Some(item.url.clone()), |element, url| {
-                element.child(div().text_xs().text_color(rgb(MUTED)).truncate().child(url))
-            })
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(hsla(colors.muted))
+                    .truncate()
+                    .child(url),
+            )
     }
 
     /// 收藏行右侧的“移除”按钮；阻止事件冒泡，避免顺带打开这篇。
-    fn remove_bookmark_button(&self, bookmark_id: i64, cx: &mut Context<Self>) -> AnyElement {
-        div()
+    fn remove_bookmark_button(
+        &self,
+        bookmark_id: i64,
+        theme: &TelaTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = &theme.colors;
+        h_flex()
             .id(("bookmark-remove", bookmark_id as u64))
             .role(Role::Button)
             .aria_label("从收藏中移除")
             .px_2()
             .py_1()
+            .gap_1()
+            .items_center()
             .rounded_md()
             .text_xs()
-            .text_color(rgb(DANGER))
+            .text_color(hsla(colors.danger))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .hover(|style| {
+                style
+                    .bg(hsla(colors.danger))
+                    .text_color(hsla(colors.background))
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.remove_bookmark(bookmark_id, cx);
             }))
+            .child(icon_element(
+                &theme.icons.remove,
+                hsla(colors.danger),
+                px(12.),
+            ))
             .child("移除")
             .into_any_element()
     }
@@ -1894,9 +2284,11 @@ impl ShellView {
     fn article_row(
         article: &ArticleItem,
         selected: Option<i64>,
+        theme: &TelaTheme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let article_id = article.id;
+        let colors = &theme.colors;
         let is_selected = selected == Some(article.id);
         v_flex()
             .id(("article", article.id as u64))
@@ -1909,9 +2301,9 @@ impl ShellView {
             .py_2()
             .rounded_md()
             .cursor_pointer()
-            .when(is_selected, |element| element.bg(rgb(BORDER)))
+            .when(is_selected, |element| element.bg(hsla(colors.selected)))
             .when(!is_selected, |element| {
-                element.hover(|style| style.bg(rgb(SIDEBAR)))
+                element.hover(|style| style.bg(hsla(colors.sidebar)))
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.select_article(article_id, cx) {
@@ -1924,26 +2316,54 @@ impl ShellView {
                     .justify_between()
                     .gap_2()
                     .child(
-                        div()
-                            .text_sm()
-                            .when(article.unread, |element| {
-                                element.font_weight(FontWeight::SEMIBOLD)
-                            })
-                            .truncate()
-                            .child(article.title.clone()),
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .items_center()
+                            .child(icon_element(
+                                &theme.icons.article,
+                                hsla(if is_selected {
+                                    colors.accent
+                                } else {
+                                    colors.muted
+                                }),
+                                px(12.),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_sm()
+                                    .when(article.unread, |element| {
+                                        element.font_weight(FontWeight::SEMIBOLD)
+                                    })
+                                    .truncate()
+                                    .child(article.title.clone()),
+                            ),
                     )
                     .when(article.unread, |element| {
-                        element.child(div().text_xs().text_color(rgb(ACCENT)).child("未读"))
+                        element.child(
+                            div()
+                                .text_xs()
+                                .text_color(hsla(colors.accent))
+                                .child("未读"),
+                        )
                     }),
             )
             .when_some(article.published_label(), |element, published| {
-                element.child(div().text_xs().text_color(rgb(MUTED)).child(published))
+                element.child(
+                    div()
+                        .text_xs()
+                        .text_color(hsla(colors.muted))
+                        .child(published),
+                )
             })
             .when_some(article.excerpt.clone(), |element, excerpt| {
                 element.child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(hsla(colors.muted))
                         .truncate()
                         .child(excerpt),
                 )
@@ -1959,29 +2379,29 @@ impl ShellView {
             .child(self.reader.clone())
     }
 
-    fn inline_error(title: &str, detail: &str) -> Div {
+    fn inline_error(title: &str, detail: &str, theme: &TelaTheme) -> Div {
         v_flex()
             .p_3()
             .gap_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(0xf38ba8))
+            .border_color(hsla(theme.colors.danger))
             .child(
                 div()
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xf38ba8))
+                    .text_color(hsla(theme.colors.danger))
                     .child(title.to_string()),
             )
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(SUBTLE))
+                    .text_color(hsla(theme.colors.subtle))
                     .child(detail.to_string()),
             )
     }
 
-    fn full_page_error(title: &str, detail: &str) -> Div {
+    fn full_page_error(title: &str, detail: &str, theme: &TelaTheme) -> Div {
         v_flex()
             .size_full()
             .items_center()
@@ -1992,18 +2412,18 @@ impl ShellView {
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(0xf38ba8))
+                    .text_color(hsla(theme.colors.danger))
                     .child(title.to_string()),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(SUBTLE))
+                    .text_color(hsla(theme.colors.subtle))
                     .child(detail.to_string()),
             )
     }
 
-    fn full_page_empty() -> Div {
+    fn full_page_empty(theme: &TelaTheme) -> Div {
         v_flex()
             .size_full()
             .items_center()
@@ -2019,22 +2439,355 @@ impl ShellView {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(theme.colors.muted))
                     .child("这是 S2 的空态；接入同步后，这里会出现订阅列表。"),
             )
+    }
+
+    /// 主题选择器：一组图标/字体/颜色/边框就是一个主题。
+    ///
+    /// 是窗口内覆盖层而不是独立窗口：主题切换要立刻看到背后的三栏与正文变化。
+    fn theme_picker_layer(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> AnyElement {
+        if !self.theme_picker_open {
+            return div().into_any_element();
+        }
+        let colors = &theme.colors;
+        let active_id = self.themes.active_id().to_string();
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for candidate in self.themes.themes() {
+            let id = candidate.id.clone();
+            let click_id = id.clone();
+            let active = id == active_id;
+            let name = candidate.name.clone();
+            let source = candidate.source.label();
+            let appearance = candidate.appearance.label();
+            let body_font = candidate.typography.body_font.clone();
+            let swatch = |color: ThemeColor| {
+                div()
+                    .w(px(14.))
+                    .h(px(14.))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(hsla(theme.borders.border))
+                    .bg(hsla(color))
+            };
+            rows.push(
+                v_flex()
+                    .id(format!("theme-{id}"))
+                    .role(Role::Button)
+                    .aria_label(format!("应用主题 {name}（{source}，{appearance}）"))
+                    .min_w(px(240.))
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(hsla(if active {
+                        theme.borders.focus
+                    } else {
+                        theme.borders.border
+                    }))
+                    .when(active, |element| element.bg(hsla(colors.selected)))
+                    .when(!active, |element| {
+                        element.hover(|style| style.bg(hsla(colors.hover)))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.apply_theme(&click_id, cx);
+                    }))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hsla(colors.muted))
+                                    .child(if active { "当前" } else { "应用" }),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hsla(colors.muted))
+                                    .child(format!("{appearance} · {source}")),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(swatch(candidate.colors.background))
+                                    .child(swatch(candidate.colors.surface))
+                                    .child(swatch(candidate.colors.text))
+                                    .child(swatch(candidate.colors.accent))
+                                    .child(swatch(candidate.borders.border)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_color(hsla(colors.muted))
+                                    .child(icon_element(
+                                        &candidate.icons.feed,
+                                        hsla(colors.muted),
+                                        px(14.),
+                                    ))
+                                    .child(icon_element(
+                                        &candidate.icons.bookmark,
+                                        hsla(colors.muted),
+                                        px(14.),
+                                    ))
+                                    .child(icon_element(
+                                        &candidate.icons.article,
+                                        hsla(colors.muted),
+                                        px(14.),
+                                    ))
+                                    .child(icon_element(
+                                        &candidate.icons.recommendation,
+                                        hsla(colors.muted),
+                                        px(14.),
+                                    ))
+                                    .child(icon_element(
+                                        &candidate.icons.theme,
+                                        hsla(colors.muted),
+                                        px(14.),
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hsla(colors.subtle))
+                                    .when_some(body_font, |element, font| element.font_family(font))
+                                    .child("Aa 文"),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let issues: Vec<String> = self
+            .themes
+            .issues()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let notice = self.theme_notice.clone();
+        let dir_line = self
+            .themes
+            .themes_dir()
+            .map(|dir| format!("主题目录：{}", dir.display()))
+            .unwrap_or_else(|| "内置主题（未启用本机主题目录）".to_string());
+        let has_dir = self.themes.themes_dir().is_some();
+        let backdrop_close = cx.listener(|this, _, _, cx| this.close_theme_picker(cx));
+        let panel_stop = cx.listener(|_, _, _, cx| cx.stop_propagation());
+        let refresh = cx.listener(|this, _, _, cx| this.refresh_themes(cx));
+        let close = cx.listener(|this, _, _, cx| this.close_theme_picker(cx));
+        let copy_dir = cx.listener(|this, _, _, cx| {
+            if let Some(dir) = this
+                .themes
+                .themes_dir()
+                .map(|dir| dir.display().to_string())
+            {
+                cx.write_to_clipboard(ClipboardItem::new_string(dir.clone()));
+                this.theme_notice = Some(format!("主题目录已复制：{dir}"));
+                cx.notify();
+            }
+        });
+
+        div()
+            .id("theme-picker-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x00000066))
+            .on_click(backdrop_close)
+            .child(
+                v_flex()
+                    .id("theme-picker")
+                    .w(px(640.))
+                    .max_w_full()
+                    .max_h(px(640.))
+                    .m_4()
+                    .p_5()
+                    .gap_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(hsla(theme.borders.border))
+                    .bg(hsla(colors.surface))
+                    .text_color(hsla(colors.text))
+                    .on_click(panel_stop)
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_lg()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child("主题"),
+                            )
+                            .child(
+                                h_flex()
+                                    .id("theme-close")
+                                    .role(Role::Button)
+                                    .aria_label("关闭主题选择")
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(hsla(colors.muted))
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(hsla(colors.selected)))
+                                    .on_click(close)
+                                    .child("关闭"),
+                            ),
+                    )
+                    .child(div().text_xs().text_color(hsla(colors.muted)).child(
+                        "图标、字体与颜色、边框修饰，一组就是一个主题；\
+                                 主题文件放在本机主题目录，重启或「重新扫描」后可用。",
+                    ))
+                    .when_some(notice, |element, notice| {
+                        element.child(
+                            div()
+                                .text_xs()
+                                .text_color(hsla(colors.subtle))
+                                .child(notice),
+                        )
+                    })
+                    .child(
+                        v_flex()
+                            .id("theme-list")
+                            .max_h(px(420.))
+                            .overflow_y_scroll()
+                            .gap_2()
+                            .children(rows),
+                    )
+                    .when(!issues.is_empty(), |element| {
+                        let count = issues.len();
+                        element.child(
+                            v_flex()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(hsla(colors.warning))
+                                        .child(format!("{count} 个主题文件未加载：")),
+                                )
+                                .children(issues.into_iter().take(5).map(|issue| {
+                                    div().text_xs().text_color(hsla(colors.danger)).child(issue)
+                                })),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_xs()
+                                    .text_color(hsla(colors.muted))
+                                    .truncate()
+                                    .child(dir_line),
+                            )
+                            .child(h_flex().items_center().gap_2().when(has_dir, |element| {
+                                element
+                                    .child(
+                                        h_flex()
+                                            .id("theme-copy-dir")
+                                            .role(Role::Button)
+                                            .aria_label("复制主题目录")
+                                            .px_2()
+                                            .py_1()
+                                            .gap_1()
+                                            .items_center()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(hsla(theme.borders.border))
+                                            .text_xs()
+                                            .text_color(hsla(colors.subtle))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(hsla(colors.selected)))
+                                            .on_click(copy_dir)
+                                            .child("复制目录"),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .id("theme-refresh")
+                                            .role(Role::Button)
+                                            .aria_label("重新扫描主题目录")
+                                            .px_2()
+                                            .py_1()
+                                            .gap_1()
+                                            .items_center()
+                                            .rounded_md()
+                                            .border_1()
+                                            .border_color(hsla(theme.borders.border))
+                                            .text_xs()
+                                            .text_color(hsla(colors.subtle))
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(hsla(colors.selected)))
+                                            .on_click(refresh)
+                                            .child(icon_element(
+                                                &theme.icons.button,
+                                                hsla(colors.subtle),
+                                                px(12.),
+                                            ))
+                                            .child("重新扫描"),
+                                    )
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 impl Render for ShellView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let sidebar = self.sidebar(cx);
-        let main = self.main_panel(cx);
-        h_flex()
+        // 主题按帧读取：切换后外壳、阅读面板与选择器看到同一份数据。
+        let theme = cx.tela_theme();
+        let sidebar = self.sidebar(&theme, cx);
+        let main = self.main_panel(&theme, cx);
+        let picker = self.theme_picker_layer(&theme, cx);
+        div()
             .id("shell-root")
+            .relative()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(hsla(theme.colors.background))
+            .text_color(hsla(theme.colors.text))
+            .when_some(theme.typography.ui_font.clone(), |element, font| {
+                element.font_family(font)
+            })
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                // 主题选择器是窗口内模态：Esc 关闭，其他快捷键一律不抢。
+                if this.theme_picker_open {
+                    if event.keystroke.key.eq_ignore_ascii_case("escape") {
+                        this.close_theme_picker(cx);
+                    }
+                    return;
+                }
                 let modifiers = event.keystroke.modifiers;
                 if modifiers.control || modifiers.alt || modifiers.platform {
                     return;
@@ -2043,10 +2796,10 @@ impl Render for ShellView {
                     cx.notify();
                 }
             }))
-            .child(sidebar)
-            .child(main)
+            .child(h_flex().size_full().child(sidebar).child(main))
             .when_some(self.bookmark_dialog.clone(), |element, dialog| {
                 element.child(dialog)
             })
+            .child(picker)
     }
 }

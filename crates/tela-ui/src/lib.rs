@@ -13,6 +13,7 @@
 pub mod account;
 pub mod reader;
 pub mod shell;
+pub mod theme;
 
 #[cfg(feature = "gui")]
 pub mod gui;

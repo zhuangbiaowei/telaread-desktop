@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::gui::theme::{ActiveTelaTheme as _, hsla, icon_element};
 use crate::shell::{BookmarkItem, BookmarkService};
 
 use gpui_kit::base::input::{InputEditorStyle, InputState};
@@ -17,16 +18,6 @@ use gpui_kit::base::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-
-const BG: u32 = 0x11111b;
-const PANEL: u32 = 0x1e1e2e;
-const BORDER: u32 = 0x313244;
-const TEXT: u32 = 0xcdd6f4;
-const MUTED: u32 = 0x6c7086;
-const SUBTLE: u32 = 0xa6adc8;
-const ACCENT: u32 = 0x89b4fa;
-const DANGER: u32 = 0xf38ba8;
-const WARN: u32 = 0xf9e2af;
 
 /// 收藏弹窗对外的通知。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,13 +53,14 @@ impl BookmarkDialogView {
             .map(|text| text.trim().to_string())
             .filter(|text| looks_like_url(text));
 
+        let theme = cx.tela_theme();
         let url = cx.new(|cx| {
             let mut state = InputState::new(window, cx).placeholder("https://example.com/article");
             state.set_editor_style(InputEditorStyle {
-                foreground: rgb(TEXT).into(),
-                background: rgb(BG).into(),
-                selection: rgba(0x89b4fa55).into(),
-                caret: rgb(TEXT).into(),
+                foreground: hsla(theme.colors.text),
+                background: hsla(theme.colors.background),
+                selection: hsla(theme.colors.selection),
+                caret: hsla(theme.colors.text),
                 ..InputEditorStyle::default()
             });
             if let Some(url) = clipboard_url {
@@ -149,6 +141,8 @@ impl BookmarkDialogView {
     }
 
     fn dialog_layer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.tela_theme();
+        let colors = &theme.colors;
         let busy = self.busy;
         let error = self.error.clone();
         let focus_url = self.url.clone();
@@ -159,8 +153,8 @@ impl BookmarkDialogView {
             .px_3()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG))
+            .border_color(hsla(theme.borders.border))
+            .bg(hsla(colors.background))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 focus_url.update(cx, |state, cx| state.focus(window, cx));
             })
@@ -174,34 +168,45 @@ impl BookmarkDialogView {
             .py_2()
             .rounded_full()
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .text_sm()
-            .text_color(rgb(SUBTLE))
+            .text_color(hsla(colors.subtle))
             .cursor_pointer()
             .when(!busy, |element| {
                 element
-                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+                    .hover(|style| {
+                        style
+                            .bg(hsla(colors.selected))
+                            .text_color(hsla(colors.text))
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.cancel(cx)))
             })
             .child("取消");
 
-        let submit = div()
+        let submit = h_flex()
             .id("bookmark-submit")
             .role(Role::Button)
             .aria_label("下载并收藏")
             .px_4()
             .py_2()
+            .gap_1()
+            .items_center()
             .rounded_full()
-            .bg(rgb(if busy { BORDER } else { ACCENT }))
+            .bg(hsla(if busy { colors.selected } else { colors.accent }))
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(if busy { MUTED } else { BG }))
+            .text_color(hsla(if busy { colors.muted } else { colors.on_accent }))
             .when(!busy, |element| {
                 element
                     .cursor_pointer()
                     .hover(|style| style.opacity(0.85))
                     .on_click(cx.listener(|this, _, _, cx| this.submit(cx)))
             })
+            .child(icon_element(
+                &theme.icons.add,
+                hsla(if busy { colors.muted } else { colors.on_accent }),
+                px(12.),
+            ))
             .child(if busy { "正在下载…" } else { "收藏" });
 
         let close_this = cx.entity().downgrade();
@@ -215,9 +220,12 @@ impl BookmarkDialogView {
             .items_stretch()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
-            .text_color(rgb(TEXT))
+            .border_color(hsla(theme.borders.border))
+            .bg(hsla(colors.surface))
+            .text_color(hsla(colors.text))
+            .when_some(theme.typography.ui_font.clone(), |element, font| {
+                element.font_family(font)
+            })
             .child(
                 DialogTitle::new()
                     .text_lg()
@@ -228,7 +236,7 @@ impl BookmarkDialogView {
                 DialogDescription::new()
                     .mt_1()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .child(
                         "输入一个网址（Shift+B 打开），Tela 会下载页面正文、标题和图片，\
                          保存到左侧「我的收藏」，断网也能读。",
@@ -236,14 +244,20 @@ impl BookmarkDialogView {
             )
             .child(div().mt_3().child(input))
             .when_some(error, |element, error| {
-                element.child(div().mt_2().text_xs().text_color(rgb(DANGER)).child(error))
+                element.child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(hsla(colors.danger))
+                        .child(error),
+                )
             })
             .when(busy, |element| {
                 element.child(
                     div()
                         .mt_2()
                         .text_xs()
-                        .text_color(rgb(WARN))
+                        .text_color(hsla(colors.warning))
                         .child("正在下载页面与图片，请稍候…（大图较多的页面需要几秒）"),
                 )
             })
@@ -255,7 +269,7 @@ impl BookmarkDialogView {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(rgb(MUTED))
+                            .text_color(hsla(colors.muted))
                             .child("Esc 取消 · Enter 收藏"),
                     )
                     .child(h_flex().gap_2().child(cancel).child(submit)),

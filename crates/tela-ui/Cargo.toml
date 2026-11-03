@@ -45,6 +45,10 @@ required-features = ["gui-test"]
 name = "gui_screenshot"
 required-features = ["gui-test"]
 
+[[test]]
+name = "gui_theme"
+required-features = ["gui-test"]
+
 [dependencies]
 tela-proto.workspace = true
 tela-store.workspace = true
@@ -52,6 +56,9 @@ tela-content.workspace = true
 tela-sync.workspace = true
 # 打开系统浏览器（原文链接 / TelaRead 主页）复用 tela-net 已按平台校验的实现。
 tela-net.workspace = true
+# 主题文件（用户手写）与本地界面设置。
+serde.workspace = true
+toml.workspace = true
 gpui-kit = { workspace = true, optional = true }
 # 仅 GUI 测试使用：GPUI 自带的 TestAppContext / #[gpui::test]。
 # 依赖键写成 `gpui`，与上游 lib target 名一致，宏展开里的 `gpui::` 路径才能解析。

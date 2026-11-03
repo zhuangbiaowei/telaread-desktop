@@ -147,6 +147,7 @@ P1（Discover 五 tab、关注与 Following、博客卷读写、通知、多窗�
 | 单元/集成测试 | 每个 crate 内 `crates/<crate>/tests/*.rs`（集成）与 `src/**` 内 `#[cfg(test)] mod tests`（单元） | 本计划新增约定（Q-12） |
 | 共享 fixture | `tests/fixtures/{sync,mutations,content,opml}/` | 本计划新增约定（§8），与 crate 测试解耦 |
 | UI golden 快照 | `crates/tela-ui/tests/snapshots/`（`insta`） | D3 §3 选型表「测试 | 内置 `#[gpui_kit::test]` + `insta` 快照」 |
+| 发布打包素材 | `packaging/macos/`（`Info.plist` + 图标）、`packaging/linux/`（AppRun + `.desktop` + 图标） | 本计划新增约定：`release.yml` 只放流程，素材集中放这里（macOS `.app` / Linux AppImage） |
 | 生成产物（不提交） | `target/`、`tests/artifacts/` | 本计划新增约定 |
 
 **计划冲突检查结论：未发现冲突。** 当前任务计划对本步骤只声明了 `docs/development_plan.md`（已满足路径），未声明任何与 `crates/*` 相悖的代码路径；D3 §3.1 的 `members = ["crates/*"]` 与本契约一致。若后续步骤的 expected_outputs 使用 `src/`、根 `tests/` 等其他布局，属**契约漂移**，必须先回写本文件第 4 章再实现，不得静默采用。

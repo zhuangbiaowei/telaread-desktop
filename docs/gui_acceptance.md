@@ -141,6 +141,25 @@
   `gui_shell` 9 passed（含 `Shift+B` → 输入 → 提交 → 列表/阅读）、
   `services_v2` 17 passed / 5 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、X 文章、带图页面/图片缓存）、截图 2 张。
 
+### S9 主题（2026-11-03）
+
+- 主题 = **图标 + 排版（字体与颜色）+ 边框修饰** 三组配置；侧栏底部「主题 · 当前主题名」
+  打开窗口内模态选择器，列出内置 `catppuccin-mocha`（深色，默认）、`catppuccin-latte`（浅色）
+  与 `paper`（暖色纸页 + 衬线正文 + 书页图标）。
+- 主题数据在 `tela-ui::theme`（无 GUI feature 可测）：`TelaTheme { icons, typography, colors,
+  borders, id, source }`；内置主题以 TOML 编译进二进制，用户主题放
+  `<数据目录>/themes/<id>.toml`，同 id 覆盖内置主题。
+- 选择写入 `<数据目录>/ui.toml`，`tela-gui` 在开窗前加载并 `install`，首帧即上次主题；
+  `TELA_THEME` 临时覆盖、`TELA_THEMES_DIR` 换主题目录。主题不参与账号同步。
+- 坏主题文件不阻断启动：错误收集到 `ThemeCatalog::issues`，在选择器底部逐条显示；
+  「重新扫描」重读目录，不重启即可看到改动；当前主题文件被删会退回默认主题。
+- 图标用 Lucide 名字（`gpui_kit::assets::AllAssets`），也可写 glyph/emoji；颜色跟随控件。
+  阅读正文的字体/字号/行高/段落间距/标题层级/链接/代码/引用/选区颜色都由
+  `TextViewStyle` 从主题推导；三栏与两个弹窗的底色/文字/边框也全部走主题 token。
+- 验收：`tela-ui` lib 主题单元测试 9 passed；`gui_theme` 3 passed（切换 → 全局主题与
+  `ui.toml` 更新、逐个内置主题渲染、选择器打开时锁住阅读快捷键）；`gui_shell` / `gui_reader` / `gui_account` /
+  `gui_smoke` 原有 GUI 测试全绿；截图 3 张（选择器、浅色、纸页）。
+
 ## 2. 验收命令与实测结果
 
 运行环境：Linux x86_64（Hyprland/Wayland）、`rustc 1.98.1`、`gpui-kit 0.8.0`
@@ -191,6 +210,9 @@ cargo test -p tela-ui --features gui-test --test gui_screenshot -- --ignored --n
 | S8 `Shift+B` 收藏网页弹窗 | ![S8 dialog](images/gui-s8-bookmark-dialog.png) |
 | 条目跳转滚动：`j` 连按 12 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll articles](images/gui-list-scroll-articles.png) |
 | 条目跳转滚动：`Shift+j` 连按 9 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll feeds](images/gui-list-scroll-feeds.png) |
+| S9 主题选择器（深色） | ![theme picker](images/gui-theme-picker.png) |
+| S9 浅色主题（Catppuccin Latte） | ![theme light](images/gui-theme-light.png) |
+| S9 纸页主题（Paper，衬线正文 + 书页图标） | ![theme paper](images/gui-theme-paper.png) |
 
 S3 截图由 `gui_screenshot` 用 GPUI `HeadlessAppContext` + WGPU 渲染，和真实窗口共用
 同一套 `ShellView`/`ReaderView` 代码，不依赖显示器。

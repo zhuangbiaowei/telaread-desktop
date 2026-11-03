@@ -1,0 +1,53 @@
+# Paper（暖色阅读纸）。
+#
+# 演示主题可以同时改三组配置：书页图标、衬线正文、暖棕描边。
+
+name = "Paper 纸页"
+appearance = "light"
+
+[icons]
+feed = "book-open"
+bookmark = "bookmark"
+article = "newspaper"
+recommendation = "star"
+button = "sparkles"
+external = "external-link"
+cache = "download"
+add = "plus"
+remove = "circle-x"
+theme = "palette"
+
+[typography]
+# 通用族名（serif / monospace）由系统字体匹配；换成本机已安装的具体字体也可以。
+body_font = "DejaVu Serif"
+heading_font = "DejaVu Serif"
+mono_font = "monospace"
+body_size = 17.5
+line_height = 1.8
+paragraph_gap = 0.6
+heading_scale = 1.05
+
+[colors]
+background = "#f6f1e7"
+sidebar = "#efe7d8"
+surface = "#fbf7ef"
+text = "#3f3a33"
+muted = "#8c8273"
+subtle = "#6b6154"
+accent = "#9a5b32"
+danger = "#b3382c"
+warning = "#a6751f"
+heading = "#2f2a24"
+link = "#8a4b23"
+code_text = "#3f3a33"
+code_background = "#ece4d4"
+quote = "#6b6154"
+selection = "#d9b98c88"
+hover = "#efe7d8"
+selected = "#e3d6bf"
+on_accent = "#fbf7ef"
+
+[borders]
+border = "#d8c9b0"
+divider = "#e3d6bf"
+focus = "#9a5b32"

@@ -18,10 +18,12 @@ use std::time::Duration;
 use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::model::TranslationAnswerStatus;
 
+use crate::gui::theme::{ActiveTelaTheme as _, hsla, icon_element};
 use crate::reader::ViewMode;
 use crate::reader::document::{ReaderDocument, TranslationStatus, preformatted_text};
 use crate::reader::session::{ReaderSession, ReaderState};
 use crate::shell::{RecommendationItem, RecommendationService, ShellData};
+use crate::theme::TelaTheme;
 
 use gpui_kit::base::input::{InputEditorStyle, TextareaState};
 use gpui_kit::base::text::{TextView, TextViewStyle};
@@ -32,16 +34,6 @@ use gpui_kit::base::{
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-
-const BG: u32 = 0x11111b;
-const PANEL: u32 = 0x1e1e2e;
-const BORDER: u32 = 0x313244;
-const TEXT: u32 = 0xcdd6f4;
-const MUTED: u32 = 0x6c7086;
-const SUBTLE: u32 = 0xa6adc8;
-const ACCENT: u32 = 0x89b4fa;
-const DANGER: u32 = 0xf38ba8;
-const WARN: u32 = 0xf9e2af;
 
 /// 阅读正文的最大行宽（单栏时居中）。
 const READING_MAX_WIDTH: f32 = 760.0;
@@ -130,6 +122,8 @@ pub struct ReaderView {
     recommend_error: Option<String>,
     /// 推荐操作的一句提示（阅读面板顶部）。
     recommend_notice: Option<String>,
+    /// 窗口级模态（主题选择器）打开时锁住阅读快捷键，避免 `t`/`j` 在遮罩后面生效。
+    input_locked: bool,
 }
 
 impl ReaderView {
@@ -181,6 +175,7 @@ impl ReaderView {
             recommend_dialog: None,
             recommend_error: None,
             recommend_notice: None,
+            input_locked: false,
         }
     }
 
@@ -212,6 +207,11 @@ impl ReaderView {
     /// 当前文章的推荐；未推荐时为 `None`。
     pub fn recommendation(&self) -> Option<&RecommendationItem> {
         self.recommendation.as_ref()
+    }
+
+    /// 窗口里有其他模态（主题选择器）时锁住阅读快捷键。
+    pub fn set_input_locked(&mut self, locked: bool) {
+        self.input_locked = locked;
     }
 
     /// 推荐弹窗是否打开（测试/诊断用）。
@@ -548,13 +548,14 @@ impl ReaderView {
             .as_ref()
             .and_then(|item| item.note.clone())
             .unwrap_or_default();
+        let theme = cx.tela_theme();
         let note = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx);
             state.set_editor_style(InputEditorStyle {
-                foreground: rgb(TEXT).into(),
-                background: rgb(BG).into(),
-                selection: rgba(0x89b4fa55).into(),
-                caret: rgb(TEXT).into(),
+                foreground: hsla(theme.colors.text),
+                background: hsla(theme.colors.background),
+                selection: hsla(theme.colors.selection),
+                caret: hsla(theme.colors.text),
                 ..InputEditorStyle::default()
             });
             state.default_value(initial)
@@ -658,8 +659,8 @@ impl ReaderView {
     ///
     /// 返回是否发生变化；调用方负责 `cx.notify()`。
     pub fn handle_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        // 推荐弹窗打开时，输入框里的字符不能被当成视图/翻页快捷键。
-        if self.recommend_dialog.is_some() {
+        // 推荐弹窗/主题选择器打开时，按键不能被当成视图/翻页快捷键。
+        if self.input_locked || self.recommend_dialog.is_some() {
             return false;
         }
         match key {
@@ -968,14 +969,16 @@ impl ReaderView {
     }
 
     fn header(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.tela_theme();
+        let colors = &theme.colors;
         if !self.has_selection() {
             return v_flex()
                 .w_full()
                 .gap_1()
                 .p_4()
-                .bg(rgb(PANEL))
+                .bg(hsla(colors.surface))
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(hsla(theme.borders.divider))
                 .child(
                     div()
                         .text_lg()
@@ -985,7 +988,7 @@ impl ReaderView {
                 .child(
                     div()
                         .text_xs()
-                        .text_color(rgb(MUTED))
+                        .text_color(hsla(colors.muted))
                         .child("从中间列表选择一篇文章开始阅读"),
                 );
         }
@@ -1025,10 +1028,12 @@ impl ReaderView {
                     .rounded_md()
                     .cursor_pointer()
                     .when(active, |element| {
-                        element.bg(rgb(ACCENT)).text_color(rgb(BG))
+                        element
+                            .bg(hsla(colors.accent))
+                            .text_color(hsla(colors.on_accent))
                     })
                     .when(!active, |element| {
-                        element.hover(|style| style.bg(rgb(BORDER)))
+                        element.hover(|style| style.bg(hsla(colors.selected)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.set_mode(option) {
@@ -1049,9 +1054,9 @@ impl ReaderView {
             .w_full()
             .gap_2()
             .p_4()
-            .bg(rgb(PANEL))
+            .bg(hsla(colors.surface))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.divider))
             .child(
                 h_flex()
                     .items_start()
@@ -1078,40 +1083,68 @@ impl ReaderView {
                                     )
                                     .when(can_open_original, |row| {
                                         row.child(
-                                            div()
+                                            h_flex()
                                                 .id("reader-open-original")
                                                 .role(Role::Button)
                                                 .aria_label("打开原文")
                                                 .px_2()
                                                 .py_1()
+                                                .gap_1()
+                                                .items_center()
                                                 .rounded_md()
                                                 .border_1()
-                                                .border_color(rgb(BORDER))
+                                                .border_color(hsla(theme.borders.border))
                                                 .text_sm()
-                                                .text_color(rgb(SUBTLE))
+                                                .text_color(hsla(colors.subtle))
                                                 .cursor_pointer()
                                                 .hover(|style| {
-                                                    style.bg(rgb(BORDER)).text_color(rgb(ACCENT))
+                                                    style
+                                                        .bg(hsla(colors.selected))
+                                                        .text_color(hsla(colors.accent))
                                                 })
                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                     this.open_original(cx);
                                                 }))
-                                                .child("↗"),
+                                                .child(icon_element(
+                                                    &theme.icons.external,
+                                                    hsla(colors.subtle),
+                                                    px(14.),
+                                                )),
                                         )
                                     })
                                     .when(show_recommend, |row| {
-                                        row.child(self.recommend_button(cx))
+                                        row.child(self.recommend_button(&theme, cx))
                                     }),
                             )
-                            .child(div().text_xs().text_color(rgb(SUBTLE)).child(status_line))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(hsla(colors.subtle))
+                                    .child(status_line),
+                            )
                             .when_some(notice, |element, notice| {
-                                element.child(div().text_xs().text_color(rgb(WARN)).child(notice))
+                                element.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(hsla(colors.warning))
+                                        .child(notice),
+                                )
                             })
                             .when_some(recommend_notice, |element, notice| {
-                                element.child(div().text_xs().text_color(rgb(ACCENT)).child(notice))
+                                element.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(hsla(colors.accent))
+                                        .child(notice),
+                                )
                             })
                             .when_some(link_notice, |element, notice| {
-                                element.child(div().text_xs().text_color(rgb(DANGER)).child(notice))
+                                element.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(hsla(colors.danger))
+                                        .child(notice),
+                                )
                             }),
                     )
                     // 收藏的网页没有译文：不显示 o/c/t 视图切换，避免出现两列相同内容。
@@ -1124,7 +1157,7 @@ impl ReaderView {
             .child(
                 div()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .child(if is_bookmark {
                         "Shift+B 继续收藏 · j/k 文章 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
                     } else {
@@ -1135,10 +1168,11 @@ impl ReaderView {
     }
 
     /// 标题旁的“推荐/已推荐”按钮：点击打开填写推荐理由的弹窗。
-    fn recommend_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn recommend_button(&self, theme: &TelaTheme, cx: &mut Context<Self>) -> AnyElement {
+        let colors = &theme.colors;
         let recommended = self.recommendation.is_some();
         let label = if recommended { "已推荐" } else { "推荐" };
-        div()
+        h_flex()
             .id("reader-recommend")
             .role(Role::Button)
             .aria_label(if recommended {
@@ -1148,46 +1182,67 @@ impl ReaderView {
             })
             .px_3()
             .py_1()
+            .gap_1()
+            .items_center()
             .rounded_full()
             .border_1()
-            .border_color(rgb(if recommended { ACCENT } else { BORDER }))
+            .border_color(hsla(if recommended {
+                colors.accent
+            } else {
+                theme.borders.border
+            }))
             .text_sm()
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
             .when(recommended, |element| {
-                element.bg(rgb(ACCENT)).text_color(rgb(BG))
+                element
+                    .bg(hsla(colors.accent))
+                    .text_color(hsla(colors.on_accent))
             })
             .when(!recommended, |element| {
-                element
-                    .text_color(rgb(SUBTLE))
-                    .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(ACCENT)))
+                element.text_color(hsla(colors.subtle)).hover(|style| {
+                    style
+                        .bg(hsla(colors.selected))
+                        .text_color(hsla(colors.accent))
+                })
             })
             .on_click(cx.listener(|this, _, window, cx| {
                 this.open_recommend_dialog(window, cx);
             }))
+            .child(icon_element(
+                &theme.icons.recommendation,
+                hsla(if recommended {
+                    colors.on_accent
+                } else {
+                    colors.subtle
+                }),
+                px(14.),
+            ))
             .child(label)
             .into_any_element()
     }
 
     fn body(&self, cx: &mut Context<Self>) -> Div {
+        let theme = cx.tela_theme();
         if !self.has_selection() {
-            return self.centered_note("选择一篇文章开始阅读", "左侧选订阅，中间选文章。");
+            return self.centered_note("选择一篇文章开始阅读", "左侧选订阅，中间选文章。", &theme);
         }
         match self.session.state() {
-            ReaderState::Loading => self.centered_note("加载中…", "正在取回正文与译文。"),
+            ReaderState::Loading => self.centered_note("加载中…", "正在取回正文与译文。", &theme),
             ReaderState::Empty => self.centered_note(
                 "本章没有正文",
                 "服务端返回了空章节，这不是错误；可以换一篇文章。",
+                &theme,
             ),
             ReaderState::Failed { message, retries } => {
                 let detail = format!("{message}（已重试 {retries} 次）");
-                self.error_body(&detail, cx)
+                self.error_body(&detail, &theme, cx)
             }
-            ReaderState::Ready(_) => self.ready_body(),
+            ReaderState::Ready(_) => self.ready_body(&theme),
         }
     }
 
-    fn ready_body(&self) -> Div {
+    fn ready_body(&self, theme: &TelaTheme) -> Div {
         let mode = self.session.mode();
         // 整篇一次渲染：不分页、不切页，一直按 PgDn / ↓ 就能读到结尾。
         // 行文本用缓存好的 SharedString，滚动时不会重新解析 HTML。
@@ -1206,13 +1261,13 @@ impl ReaderView {
             list = list.child(
                 div()
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(theme.colors.muted))
                     .child("这篇文章没有可显示的段落。"),
             );
         } else {
-            list = list.child(self.column_header(mode));
+            list = list.child(self.column_header(mode, theme));
             for row in rows {
-                list = list.child(self.row_block(row, mode));
+                list = list.child(self.row_block(row, mode, theme));
             }
             // 结尾标记：给读者一个明确的“读完了”信号，避免以为还有内容没加载。
             list = list.child(
@@ -1223,7 +1278,7 @@ impl ReaderView {
                     .pb_4()
                     .text_xs()
                     .text_center()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(theme.colors.muted))
                     .child("— 全文完 —"),
             );
         }
@@ -1231,7 +1286,7 @@ impl ReaderView {
     }
 
     /// 顶部只出现一次的列标题（原文 / 译文）。
-    fn column_header(&self, mode: ViewMode) -> Div {
+    fn column_header(&self, mode: ViewMode, theme: &TelaTheme) -> Div {
         let Some(doc) = self.session.state().document() else {
             return div().w_full();
         };
@@ -1247,7 +1302,13 @@ impl ReaderView {
             format!("译文 · {}", language_label(&doc.lang))
         };
 
-        let label = |text: String| div().text_xs().text_color(rgb(MUTED)).child(text);
+        let label = |text: String| {
+            div()
+                .text_xs()
+                .text_color(hsla(theme.colors.muted))
+                .child(text)
+        };
+        let divider = hsla(theme.borders.divider);
 
         match mode {
             ViewMode::Compare => h_flex()
@@ -1255,32 +1316,33 @@ impl ReaderView {
                 .items_center()
                 .pb_2()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(divider)
                 .child(div().flex_1().min_w_0().pr_6().child(label(original)))
-                .child(div().w(px(1.)).h(px(12.)).bg(rgb(BORDER)))
+                .child(div().w(px(1.)).h(px(12.)).bg(divider))
                 .child(div().flex_1().min_w_0().pl_6().child(label(translated))),
             ViewMode::Original => v_flex()
                 .w_full()
                 .max_w(px(READING_MAX_WIDTH))
                 .pb_2()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(divider)
                 .child(label(original)),
             ViewMode::Translation => v_flex()
                 .w_full()
                 .max_w(px(READING_MAX_WIDTH))
                 .pb_2()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(divider)
                 .child(label(translated)),
         }
     }
 
-    fn row_block(&self, row: &RenderedRow, mode: ViewMode) -> Div {
+    fn row_block(&self, row: &RenderedRow, mode: ViewMode, theme: &TelaTheme) -> Div {
         let original = self.block_view(
             format!("reader-original-{}", row.index),
             row.original_html.clone(),
             &row.tag,
+            theme,
         );
 
         // 缺译文时回退原文（代码/图片/超额段落仍然可读）；顶部状态条会说明
@@ -1289,6 +1351,7 @@ impl ReaderView {
             format!("reader-translation-{}", row.index),
             row.translation_html.clone(),
             &row.tag,
+            theme,
         );
 
         match mode {
@@ -1308,39 +1371,49 @@ impl ReaderView {
                 .w_full()
                 .items_stretch()
                 .child(v_flex().flex_1().min_w_0().py_3().pr_6().child(original))
-                .child(div().w(px(1.)).bg(rgb(BORDER)))
+                .child(div().w(px(1.)).bg(hsla(theme.borders.divider)))
                 .child(v_flex().flex_1().min_w_0().py_3().pl_6().child(translation)),
         }
     }
 
     /// 一个块 → 富文本元素；代码块单独渲染，其余按 HTML（标题/引用/链接/表格/图片）。
-    fn block_view(&self, id: String, html: SharedString, tag: &str) -> AnyElement {
+    fn block_view(
+        &self,
+        id: String,
+        html: SharedString,
+        tag: &str,
+        theme: &TelaTheme,
+    ) -> AnyElement {
         let is_code = tag == "pre" || html.trim_start().to_ascii_lowercase().starts_with("<pre");
         if is_code {
-            return self.code_block(id, preformatted_text(&html));
+            return self.code_block(id, preformatted_text(&html), theme);
         }
-        self.rich_text(id, html).into_any_element()
+        self.rich_text(id, html, theme).into_any_element()
     }
 
     /// 等宽代码块；避免 GPUI 把 `<pre><code>` 当成行内代码画出浅色圆角条。
-    fn code_block(&self, id: String, code: String) -> AnyElement {
+    fn code_block(&self, id: String, code: String, theme: &TelaTheme) -> AnyElement {
+        let typography = &theme.typography;
+        let code_size = (typography.body_size * 0.88).clamp(11.0, 20.0);
         v_flex()
             .id(id)
             .w_full()
             .min_w_0()
             .rounded_md()
-            .bg(rgb(PANEL))
+            .bg(hsla(theme.colors.code_background))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .p_3()
             .child(
                 div()
                     .w_full()
                     .min_w_0()
-                    .font_family("monospace")
-                    .text_sm()
+                    .when_some(typography.mono_font.clone(), |element, font| {
+                        element.font_family(font)
+                    })
+                    .text_size(px(code_size))
                     .line_height(relative(1.6))
-                    .text_color(rgb(TEXT))
+                    .text_color(hsla(theme.colors.code_text))
                     .child(code)
                     .overflow_x_scrollbar(),
             )
@@ -1348,12 +1421,18 @@ impl ReaderView {
     }
 
     /// 一个块 → 富文本元素；标题、引用、链接、表格和图片按原 HTML 渲染。
-    fn rich_text(&self, id: String, html: SharedString) -> impl IntoElement {
+    fn rich_text(&self, id: String, html: SharedString, theme: &TelaTheme) -> impl IntoElement {
         let cache = Arc::clone(&self.image_cache);
+        let typography = &theme.typography;
         TextView::html(ElementId::Name(id.into()), html)
-            .style(text_style())
+            .style(text_style(theme))
             .selectable(true)
             .w_full()
+            .text_size(px(typography.body_size))
+            .line_height(relative(typography.line_height))
+            .when_some(typography.body_font.clone(), |element, font| {
+                element.font_family(font)
+            })
             .image_source(move |uri| {
                 let src = uri.as_ref();
                 // 内联 data: 图由 GPUI 自己处理。
@@ -1377,6 +1456,8 @@ impl ReaderView {
         let Some(dialog) = &self.recommend_dialog else {
             return div().into_any_element();
         };
+        let theme = cx.tela_theme();
+        let colors = &theme.colors;
         let editing = dialog.editing;
         let note = dialog.note.clone();
         let focus_note = note.clone();
@@ -1389,8 +1470,8 @@ impl ReaderView {
             .py_2()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG))
+            .border_color(hsla(theme.borders.border))
+            .bg(hsla(colors.background))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 focus_note.update(cx, |state, cx| state.focus(window, cx));
             })
@@ -1404,45 +1485,67 @@ impl ReaderView {
             .py_2()
             .rounded_full()
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(hsla(theme.borders.border))
             .text_sm()
-            .text_color(rgb(SUBTLE))
+            .text_color(hsla(colors.subtle))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(BORDER)).text_color(rgb(TEXT)))
+            .hover(|style| {
+                style
+                    .bg(hsla(colors.selected))
+                    .text_color(hsla(colors.text))
+            })
             .on_click(cx.listener(|this, _, _, cx| {
                 this.close_recommend_dialog();
                 cx.notify();
             }))
             .child("取消");
 
-        let submit = div()
+        let submit = h_flex()
             .id("reader-recommend-submit")
             .role(Role::Button)
             .aria_label(if editing { "保存推荐" } else { "推荐" })
             .px_4()
             .py_2()
+            .gap_1()
+            .items_center()
             .rounded_full()
-            .bg(rgb(ACCENT))
+            .bg(hsla(colors.accent))
             .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(rgb(BG))
+            .text_color(hsla(colors.on_accent))
             .cursor_pointer()
             .hover(|style| style.opacity(0.85))
             .on_click(cx.listener(|this, _, _, cx| this.submit_recommendation(cx)))
+            .child(icon_element(
+                &theme.icons.button,
+                hsla(colors.on_accent),
+                px(12.),
+            ))
             .child(if editing { "保存" } else { "推荐" });
 
-        let unrecommend = div()
+        let unrecommend = h_flex()
             .id("reader-recommend-unrecommend")
             .role(Role::Button)
             .aria_label("取消推荐")
             .px_3()
             .py_2()
+            .gap_1()
+            .items_center()
             .rounded_full()
             .text_sm()
-            .text_color(rgb(DANGER))
+            .text_color(hsla(colors.danger))
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(DANGER)).text_color(rgb(BG)))
+            .hover(|style| {
+                style
+                    .bg(hsla(colors.danger))
+                    .text_color(hsla(colors.background))
+            })
             .on_click(cx.listener(|this, _, _, cx| this.confirm_unrecommend(cx)))
+            .child(icon_element(
+                &theme.icons.remove,
+                hsla(colors.danger),
+                px(12.),
+            ))
             .child("取消推荐");
 
         let close_this = cx.entity().downgrade();
@@ -1456,9 +1559,12 @@ impl ReaderView {
             .items_stretch()
             .rounded_lg()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
-            .text_color(rgb(TEXT))
+            .border_color(hsla(theme.borders.border))
+            .bg(hsla(colors.surface))
+            .text_color(hsla(colors.text))
+            .when_some(theme.typography.ui_font.clone(), |element, font| {
+                element.font_family(font)
+            })
             .child(
                 DialogTitle::new()
                     .text_lg()
@@ -1473,18 +1579,24 @@ impl ReaderView {
                 DialogDescription::new()
                     .mt_1()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .child("推荐语会显示在你的个人页，作者也能看到；可以留空。"),
             )
             .child(div().mt_3().child(textarea))
             .when_some(error, |element, error| {
-                element.child(div().mt_2().text_xs().text_color(rgb(DANGER)).child(error))
+                element.child(
+                    div()
+                        .mt_2()
+                        .text_xs()
+                        .text_color(hsla(colors.danger))
+                        .child(error),
+                )
             })
             .child(
                 div()
                     .mt_2()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(colors.muted))
                     .child(format!("最多 {} 字", tela_proto::MAX_RECOMMENDATION_NOTE)),
             )
             .child(
@@ -1527,7 +1639,7 @@ impl ReaderView {
             .into_any_element()
     }
 
-    fn centered_note(&self, title: &str, detail: &str) -> Div {
+    fn centered_note(&self, title: &str, detail: &str, theme: &TelaTheme) -> Div {
         v_flex()
             .flex_1()
             .size_full()
@@ -1544,12 +1656,12 @@ impl ReaderView {
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(MUTED))
+                    .text_color(hsla(theme.colors.muted))
                     .child(detail.to_string()),
             )
     }
 
-    fn error_body(&self, detail: &str, cx: &mut Context<Self>) -> Div {
+    fn error_body(&self, detail: &str, theme: &TelaTheme, cx: &mut Context<Self>) -> Div {
         v_flex()
             .flex_1()
             .size_full()
@@ -1561,29 +1673,36 @@ impl ReaderView {
                 div()
                     .text_lg()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(DANGER))
+                    .text_color(hsla(theme.colors.danger))
                     .child("正文加载失败"),
             )
             .child(
                 div()
                     .text_sm()
-                    .text_color(rgb(SUBTLE))
+                    .text_color(hsla(theme.colors.subtle))
                     .child(detail.to_string()),
             )
             .child(
-                div()
+                h_flex()
                     .id("reader-retry")
                     .role(Role::Button)
                     .aria_label("重试")
                     .px_3()
                     .py_2()
+                    .gap_1()
+                    .items_center()
                     .rounded_md()
-                    .bg(rgb(ACCENT))
-                    .text_color(rgb(BG))
+                    .bg(hsla(theme.colors.accent))
+                    .text_color(hsla(theme.colors.on_accent))
                     .cursor_pointer()
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.reload(cx);
                     }))
+                    .child(icon_element(
+                        &theme.icons.button,
+                        hsla(theme.colors.on_accent),
+                        px(12.),
+                    ))
                     .child("重试"),
             )
     }
@@ -1595,16 +1714,20 @@ impl Render for ReaderView {
             window.focus(&self.focus, cx);
             self.focused = true;
         }
-        // Up/Down 按窗口正文行高滚动；放大字体时步长跟着变。
-        self.line_height = window.line_height();
+        let theme = cx.tela_theme();
+        // ↑/↓ 的滚动步长跟随正文字号与行高，换主题/放大字体时保持一致。
+        self.line_height = px(theme.typography.body_size * theme.typography.line_height);
         let header = self.header(cx);
         let body = self.body(cx);
         let recommend_dialog = self.recommend_dialog_layer(cx);
         v_flex()
             .id("reader-root")
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(hsla(theme.colors.background))
+            .text_color(hsla(theme.colors.text))
+            .when_some(theme.typography.ui_font.clone(), |element, font| {
+                element.font_family(font)
+            })
             .track_focus(&self.focus)
             .focusable()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
@@ -1632,23 +1755,54 @@ fn page_step(viewport: Pixels) -> Pixels {
     }
 }
 
-/// 正文富文本样式：沿用 Catppuccin 配色，避免 TextView 落到浅色主题。
-fn text_style() -> TextViewStyle {
+/// 正文富文本样式：颜色与字体全部来自主题。
+///
+/// `TextViewStyle` 没有单独的引用色，基类把引用块画成 `muted_foreground`，
+/// 所以这里把主题的 `quote` 接到 muted 上；正文里其余弱化文字（h6）也跟着它，
+/// 视觉上仍是一类「次要文字」。
+fn text_style(theme: &TelaTheme) -> TextViewStyle {
+    let colors = &theme.colors;
+    let typography = &theme.typography;
     let inline_code = HighlightStyle {
-        background_color: Some(rgb(BORDER).into()),
-        color: Some(rgb(TEXT).into()),
+        background_color: Some(hsla(colors.code_background)),
+        color: Some(hsla(colors.code_text)),
         ..Default::default()
     };
+    let heading_color = hsla(colors.heading);
+    let heading_font = typography
+        .heading_font
+        .clone()
+        .or_else(|| typography.body_font.clone());
+    let body_size = typography.body_size;
+    let heading_scale = typography.heading_scale;
     TextViewStyle::default()
-        .with_foreground(rgb(TEXT).into())
-        .with_muted_foreground(rgb(MUTED).into())
-        .with_link(rgb(ACCENT).into())
-        .with_selection(rgba(0x89b4fa55).into())
-        .with_code_background(rgb(PANEL).into())
-        .with_border(rgb(BORDER).into())
+        .with_foreground(hsla(colors.text))
+        .with_muted_foreground(hsla(colors.quote))
+        .with_link(hsla(colors.link))
+        .with_selection(hsla(colors.selection))
+        .with_code_background(hsla(colors.code_background))
+        .with_border(hsla(theme.borders.border))
         .with_inline_code(inline_code)
-        .with_paragraph_gap(rems(0.55))
-        .with_dark(true)
+        .with_paragraph_gap(rems(typography.paragraph_gap))
+        .with_heading(move |level| {
+            // 与 gpui-base 的默认层级保持同样的比例，只做整体缩放与换字体/颜色。
+            let scale = match level {
+                1 => 1.8,
+                2 => 4. / 3.,
+                3 => 17. / 15.,
+                4 => 1.0,
+                5 => 14. / 15.,
+                _ => 13. / 15.,
+            };
+            let mut style = StyleRefinement::default()
+                .text_size(px(body_size * scale * heading_scale))
+                .text_color(heading_color);
+            if let Some(font) = &heading_font {
+                style = style.font_family(font.clone());
+            }
+            style
+        })
+        .with_dark(theme.is_dark())
 }
 
 /// `(contentKey, lang)` → 去重键。

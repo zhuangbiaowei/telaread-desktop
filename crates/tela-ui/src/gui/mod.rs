@@ -14,6 +14,7 @@ use tela_content::api::ContentApi;
 
 use crate::account::AccountService;
 use crate::shell::{BookmarkService, OfflineCacheService, RecommendationService, ShellData};
+use crate::theme::{ThemeCatalog, ThemePaths};
 
 use gpui_kit::base::v_flex;
 use gpui_kit::*;
@@ -21,9 +22,11 @@ use gpui_kit::*;
 pub mod bookmark;
 pub mod reader;
 pub mod shell;
+pub mod theme;
 pub use bookmark::BookmarkDialogView;
 pub use reader::ReaderView;
 pub use shell::ShellView;
+pub use theme::{ActiveTelaTheme as _, icon_element, install as install_theme};
 
 /// 应用窗口标题（同时用作测试断言的可读标识）。
 pub const WINDOW_TITLE: &str = "Tela Desktop";
@@ -39,6 +42,8 @@ pub struct GuiApp {
     offline_cache: Option<Arc<dyn OfflineCacheService>>,
     recommendations: Option<Arc<dyn RecommendationService>>,
     bookmarks: Option<Arc<dyn BookmarkService>>,
+    /// 主题目录与界面设置文件；默认只用内置主题（测试最小装配）。
+    theme_paths: ThemePaths,
 }
 
 impl GuiApp {
@@ -51,6 +56,7 @@ impl GuiApp {
             offline_cache: None,
             recommendations: None,
             bookmarks: None,
+            theme_paths: ThemePaths::default(),
         }
     }
 
@@ -67,6 +73,7 @@ impl GuiApp {
             offline_cache: None,
             recommendations: None,
             bookmarks: None,
+            theme_paths: ThemePaths::default(),
         }
     }
 
@@ -85,6 +92,12 @@ impl GuiApp {
     /// 装配网页收藏能力（`Shift+B` 弹窗与“我的收藏”列表）。
     pub fn with_bookmarks(mut self, bookmarks: Arc<dyn BookmarkService>) -> Self {
         self.bookmarks = Some(bookmarks);
+        self
+    }
+
+    /// 装配主题目录与界面设置文件（真实 GUI 用；不调用则只有内置主题）。
+    pub fn with_theme_paths(mut self, paths: ThemePaths) -> Self {
+        self.theme_paths = paths;
         self
     }
 }
@@ -174,30 +187,38 @@ pub fn run(app: GuiApp) {
     let offline_cache = app.offline_cache;
     let recommendations = app.recommendations;
     let bookmarks = app.bookmarks;
-    gpui_kit::application().run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        gpui_kit::open_window(window_options(cx), cx, move |_, cx| {
-            cx.new(|cx| {
-                ShellView::new_with_bookmarks(
-                    data.clone(),
-                    content.clone(),
-                    accounts.clone(),
-                    offline_cache.clone(),
-                    recommendations.clone(),
-                    bookmarks.clone(),
-                    cx,
-                )
+    // 主题在开窗前解析：首帧就是用户上次选择的主题，不会先闪一下默认配色。
+    let catalog = ThemeCatalog::load(&app.theme_paths);
+    let initial_theme = catalog.active().clone();
+    gpui_kit::application()
+        // 主题图标来自内置的 Lucide 资源；不注册的话 SVG 不会落盘到窗口。
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(move |cx: &mut App| {
+            gpui_kit::init(cx);
+            theme::install(cx, initial_theme.clone());
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
             })
-        })
-        .expect("open Tela window");
-        cx.activate(true);
-    });
+            .detach();
+            gpui_kit::open_window(window_options(cx), cx, move |_, cx| {
+                cx.new(|cx| {
+                    ShellView::new_with_theme_catalog(
+                        data.clone(),
+                        content.clone(),
+                        accounts.clone(),
+                        offline_cache.clone(),
+                        recommendations.clone(),
+                        bookmarks.clone(),
+                        catalog.clone(),
+                        cx,
+                    )
+                })
+            })
+            .expect("open Tela window");
+            cx.activate(true);
+        });
 }
 
 /// S0 启动入口：打开窗口并显示 [`BootView`]。
@@ -205,16 +226,19 @@ pub fn run(app: GuiApp) {
 /// 保留它作为无业务依赖的最小回归点，便于把「窗口起不来」与
 /// 「业务视图画错」两类故障分开定位。
 pub fn run_demo() {
-    gpui_kit::application().run(|cx: &mut App| {
-        gpui_kit::init(cx);
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        gpui_kit::open_window(window_options(cx), cx, |_, cx| cx.new(|_| BootView::new()))
-            .expect("open Tela window");
-        cx.activate(true);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::AllAssets)
+        .run(|cx: &mut App| {
+            gpui_kit::init(cx);
+            theme::install(cx, crate::theme::default_theme().clone());
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            gpui_kit::open_window(window_options(cx), cx, |_, cx| cx.new(|_| BootView::new()))
+                .expect("open Tela window");
+            cx.activate(true);
+        });
 }

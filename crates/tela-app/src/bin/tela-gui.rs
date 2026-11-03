@@ -28,6 +28,7 @@ use tela_proto::TelaError;
 use tela_ui::account::AccountService;
 use tela_ui::gui::{GuiApp, run};
 use tela_ui::shell::{BookmarkService, RecommendationService, ShellData};
+use tela_ui::theme::ThemePaths;
 
 /// 命令行参数。
 struct Args {
@@ -104,10 +105,18 @@ fn main() {
     let bookmarks: Arc<dyn BookmarkService> = services.clone();
     let content = services.content();
     let offline_cache = services.offline_cache();
+    // 主题是设备本地设置：与数据库放在同一数据目录（`themes/` 与 `ui.toml`）。
+    let theme_paths = services
+        .db_path()
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(ThemePaths::from_env_or_data_dir)
+        .unwrap_or_default();
     run(GuiApp::with_accounts(data, content, accounts)
         .with_offline_cache(offline_cache)
         .with_recommendations(recommendations)
-        .with_bookmarks(bookmarks));
+        .with_bookmarks(bookmarks)
+        .with_theme_paths(theme_paths));
 }
 
 /// 启动失败：终端 + 数据目录里的日志各留一份，然后按错误码退出。
