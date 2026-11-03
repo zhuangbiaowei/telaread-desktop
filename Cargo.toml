@@ -11,7 +11,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -31,6 +31,8 @@ clap = { version = "4", features = ["derive"] }
 # M0 声明、M1（wire 类型/错误类型）起使用。
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 主题文件是用户手写的，用 TOML 比 JSON 更适合写注释与分组。
+toml = "0.8"
 thiserror = "2"
 uuid = { version = "1", features = ["v7"] }
 # M2 起（tela-ui）：GUI 依赖需要 libxkbcommon/vulkan 等系统库。

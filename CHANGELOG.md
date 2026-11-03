@@ -3,6 +3,43 @@
 本项目的版本发布见 [GitHub Releases](https://github.com/zhuangbiaowei/telaread-desktop/releases)。
 下面按版本记录桌面端的主要变化；更细的提交历史见 `git log`。
 
+## v0.4.5 — 2026-11-03
+
+**主题**：图标、字体与颜色、边框修饰，一组就是一个主题。
+
+- 侧栏底部新增「主题 · 当前主题名」入口；主题选择器列出内置 **Catppuccin Mocha**
+  （深色，默认）、**Catppuccin Latte**（浅色）与 **Paper 纸页**（暖色 + 衬线正文 + 书页图标）。
+- 主题分成三组配置：`[icons]`（博客、收藏、文章、推荐、按钮、打开原文、缓存、新增、
+  移除、主题入口）、`[typography]` + `[colors]`（界面/正文/标题/代码字体，字号、行高、
+  段落间距，以及标题/链接/代码/引用/选区等颜色）、`[borders]`（描边、分隔线、焦点）。
+- 本机主题：`<数据目录>/themes/<id>.toml`，文件名即 id；与内置主题同 id 时覆盖内置主题。
+  选择器里的「重新扫描」支持边改边看；坏文件只会在选择器底部报错，不会阻止启动。
+- 选择立即生效并写入 `<数据目录>/ui.toml`，开窗前解析，首帧就是上次的主题；
+  主题不参与账号同步。`TELA_THEME` / `TELA_THEMES_DIR` 可用于临时切换主题与主题目录。
+- 阅读正文的字体、字号、行高、段落间距、标题层级与链接/代码/引用/选区颜色全部来自主题；
+  侧栏、列表、阅读面板与两个弹窗的边框/底色/文字色也不再写死。
+- 完整格式见 [docs/themes.md](./docs/themes.md)。
+
+**发布打包**：macOS 改成 `Tela.app`，Linux 增加 AppImage。
+
+- macOS 包从「tar.gz 里两个裸可执行文件」改成 zip 里的 `Tela.app`
+  （`packaging/macos/Info.plist` + 图标），并做 ad-hoc 签名（`codesign -s -`）：
+  有 Dock 图标和菜单栏，双击才是正常应用。首次打开仍要在「系统设置 → 隐私与安全性」
+  点「仍要打开」，因为 ad-hoc 签名满足不了 Gatekeeper（macOS 15 起也没有
+  「右键 → 打开」这条绕过了）。彻底免掉这一步需要 Developer ID 签名 + 公证，本轮不做。
+- Linux 新增 AppImage（`packaging/linux/` 的 `AppRun` + `.desktop` + 图标），
+  与 tar.gz 并存；`release.yml` 打完包会用 `--check --demo` 冒烟验证产物。
+- Windows 包不变。
+
+**本地安装**：release 构建可以直接装成桌面入口。
+
+- 新增 `packaging/linux/install-desktop-entry.sh`：构建 `--release --features gui`，
+  并把启动脚本、`.desktop`、图标装到 `~/.local/{bin,share}`，装完在 Omarchy 里
+  `SUPER + SPACE` → `tela` 即可启动（`--no-build` / `--uninstall` 只重装或移除入口）。
+- 启动逻辑从用户目录搬进仓库（`packaging/linux/tela-desktop-launcher.sh` 模板）：
+  探测本地代理、读 `tmp/tela.env`、日志写 `~/.local/state/tela-desktop.log`、
+  缺二进制时自动构建；仓库路径在安装时写入，也可用 `TELA_PROJECT_ROOT` 覆盖。
+
 ## v0.4.4 — 2026-11-02
 
 **代理支持**：HTTP 客户端读取环境变量里的代理设置。

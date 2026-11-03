@@ -4,10 +4,13 @@
 
 基于 [Tela](https://telaread.com) 的桌面阅读器（Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit)）。
 
-> **当前进度（v0.4.4）**：**真实 API v1 底座已接通** —— OAuth 2.1 + PKCE 登录、刷新令牌进系统凭据库、
-> 全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、订阅级一键离线缓存、
-> 推荐文章与「我的推荐」、`Shift+B` 收藏任意网页到「我的收藏」、断网自动暂停译文轮询、
-> 终端 CLI 与离线 GUI demo。
+> **当前进度（v0.4.5）**：**主题化界面 + 真实 API v1 底座** —— 三套内置主题
+> （Catppuccin Mocha / Latte、Paper 纸页）与本机 TOML 主题（图标、字体、颜色、边框都可配），
+> 选择立即生效、下次开窗仍是它；底座是已接通的真实 API v1 —— OAuth 2.1 + PKCE 登录、
+> 刷新令牌进系统凭据库、全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、
+> 订阅级一键离线缓存、推荐文章与「我的推荐」、`Shift+B` 收藏任意网页到「我的收藏」、
+> 断网自动暂停译文轮询、终端 CLI 与离线 GUI demo。
+> 本地 release 构建可一条命令装成桌面入口（`packaging/linux/install-desktop-entry.sh`）。
 > 协议依据是官方 [authorization.md](https://github.com/hutusi/tela/blob/main/docs/api/authorization.md)
 > 与 [v1.md](https://github.com/hutusi/tela/blob/main/docs/api/v1.md)（2026-10-28 实读）。
 > 详细落地说明见 [`docs/real-api.md`](./docs/real-api.md)。
@@ -119,7 +122,7 @@ HTTPS_PROXY=http://127.0.0.1:7888 tela-desktop
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.4.4
+cargo run -p tela-app -- --version                        # tela-app 0.4.5
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -227,6 +230,22 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 收藏的网页没有译文，阅读面板只显示原文，不出现 `原文 | 对照 | 译文` 切换；
   标题旁的 `↗` 仍然打开原网址。
 
+### 主题
+
+- 侧栏底部有「主题 · 当前主题名」入口，点开是主题选择器：内置 **Catppuccin Mocha**
+  （深色）、**Catppuccin Latte**（浅色）与 **Paper 纸页**（暖色 + 衬线正文 + 书页图标）。
+- 一个主题就是一组配置，分三类：**图标**（博客、收藏、文章、推荐、按钮、打开原文、
+  缓存、新增、移除、主题入口）、**字体与颜色**（界面/正文/标题/代码字体，字号、行高、
+  段落间距，以及正文标题/链接/代码/引用/选区等颜色）、**边框修饰**（描边、分隔线、焦点）。
+- 选择立即生效并写入 `<数据目录>/ui.toml`，下次启动第一帧就是该主题，不会先闪一下默认配色；
+  主题是本机设置，不参与账号同步。
+- 自定义主题：在 `<数据目录>/themes/<id>.toml` 放一个 TOML 文件，文件名就是主题 id；
+  同 id 会覆盖内置主题。主题选择器里的「重新扫描」可以边改边看，改坏了会在选择器底部
+  显示具体原因，不影响启动。
+- 完整格式（图标名、字体、颜色、边框字段与取值范围）见 [docs/themes.md](./docs/themes.md)。
+
+![主题选择器（内置深色/浅色/纸页）](docs/images/gui-theme-picker.png)
+
 ### 离线缓存与加载策略
 
 - **本地优先**：正文、译文和图片第一次成功取回后写入 SQLite；之后打开同一篇时，
@@ -259,7 +278,7 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
   `Shift+B` 收藏一个网址（打开「收藏网页」弹窗）。
 - 阅读：`o` 原文、`c` 对照、`t` 译文、`↑` / `↓` 逐行滚动、
   `PgUp` / `PgDn` 按视口滚动（一篇到底、不切页）、`r` 重试。
-- 鼠标：点击订阅/文章切换，滚轮滚动，正文文字可选中。
+- 鼠标：点击订阅/文章切换，滚轮滚动，正文文字可选中；侧栏底部「主题」打开主题选择器。
 
 ### 演示模式
 
@@ -273,7 +292,8 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 
 ### 当前限制
 
-- 界面固定深色主题，没有字号/行宽/主题设置页。
+- 主题可选（内置深色/浅色/纸页，支持本机主题文件），但没有字号/行宽的滑杆设置页；
+  字号与行高目前只能在主题文件里改。
 - 只有「按订阅」文章列表，没有跨订阅的 Unread / Today / Liked 视图。
 - 没有周期性后台同步；目前是启动时同步一次，登录/标记已读等操作后再同步。
 - 没有搜索、Discover、文件夹、高亮/笔记、OPML 与自动更新入口。
@@ -349,6 +369,7 @@ SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 | `crates/tela-app` | 装配（`services.rs`）、本地缓存层（`content_cache.rs`）、终端 CLI、GPUI 入口 |
 | `tests/fixtures/api/` | 官方 v1 示例响应体（同步/变更/me/usage/meta/翻译） |
 | `tests/fixtures/content/` | 正文与译本对象 fixture（含图片 URL） |
+| `packaging/` | 发布打包素材：`macos/`（`Info.plist` + 图标）、`linux/`（AppRun + `.desktop` + 图标 + 本地桌面入口安装脚本） |
 
 ### 关键语义
 
@@ -364,6 +385,33 @@ SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 
 更完整的接口映射、错误码与安全说明见 [`docs/real-api.md`](./docs/real-api.md)。
 
+## 本地 release 构建与桌面入口（Linux / Omarchy）
+
+不发布、只在本机用 release 版本时，一条命令就够：
+
+```bash
+./packaging/linux/install-desktop-entry.sh             # 构建 release + 装桌面入口
+./packaging/linux/install-desktop-entry.sh --no-build  # 只重装入口（复用现有产物）
+./packaging/linux/install-desktop-entry.sh --uninstall # 移除入口（不动 target/ 与数据库）
+```
+
+装完在 Omarchy 里按 `SUPER + SPACE`（launcher）→ 输入 `tela` → 回车；
+菜单里也会出现「Tela Desktop / Tela 桌面版」。脚本做四件事：
+
+| 产物 | 作用 |
+|---|---|
+| `target/release/tela-gui` + `tela-app` | 实际二进制（`--features gui --bin tela-gui`） |
+| `~/.local/bin/tela-desktop` | 启动脚本：探测本地代理、读 `tmp/tela.env`、输出写日志、缺二进制时自动构建 |
+| `~/.local/share/applications/tela-desktop.desktop` | 桌面入口（`StartupWMClass=tela-desktop`，与 GPUI 的 `app_id` 一致） |
+| `~/.local/share/icons/hicolor/512x512/apps/tela-desktop.png` | 图标 |
+
+- 日志：`~/.local/state/tela-desktop.log`（launcher 启动时不带终端，失败原因只在这里）。
+- 调试构建：`TELA_PROFILE=debug tela-desktop`；换仓库路径：`TELA_PROJECT_ROOT=/path/to/repo tela-desktop`。
+- 手动等价命令：`cargo build --release -p tela-app --features gui --bin tela-gui --locked`。
+- 想让 `SUPER + SPACE` **直接**启动 Tela（而不是打开 launcher），在
+  `~/.config/hypr/bindings.lua` 里加 `o.bind("SUPER + SPACE", "Tela", "tela-desktop")`
+  （与默认的 `omarchy-menu toggle` 二选一，重复绑定会冲突）。
+
 ## 发布
 
 发布由 [`release.yml`](./.github/workflows/release.yml) 自动完成：
@@ -371,8 +419,8 @@ SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.4 -m "Tela Desktop v0.4.4"
-git push origin v0.4.4
+git tag -a v0.4.5 -m "Tela Desktop v0.4.5"
+git push origin v0.4.5
 ```
 
 推送 tag 后：
@@ -380,28 +428,44 @@ git push origin v0.4.4
 1. 在 Linux 上校验 tag/版本并跑完整测试；
 2. 在 `ubuntu-24.04`、`windows-latest`、`macos-15`（Apple Silicon）与
    `macos-15-intel`（Intel）四个平台原生构建 `tela-app` 与 `tela-gui`；
-3. 生成
-   `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz`、
-   `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip`、
-   `tela-desktop-<tag>-aarch64-apple-darwin.tar.gz`、
-   `tela-desktop-<tag>-x86_64-apple-darwin.tar.gz` 及对应 `.sha256`；
+3. 生成下列产物（各附 `.sha256`）：
+   - Linux：`tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz` 与
+     `tela-desktop-<tag>-x86_64-unknown-linux-gnu.AppImage`；
+   - Windows：`tela-desktop-<tag>-x86_64-pc-windows-msvc.zip`；
+   - macOS：`tela-desktop-<tag>-aarch64-apple-darwin.zip`、
+     `tela-desktop-<tag>-x86_64-apple-darwin.zip`（zip 里是 `Tela.app`）；
 4. 创建 GitHub Release（自动生成 release notes）。
 
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.4-rc.1 -m "Tela Desktop v0.4.4-rc.1"
-git push origin v0.4.4-rc.1
+git tag -a v0.4.5-rc.1 -m "Tela Desktop v0.4.5-rc.1"
+git push origin v0.4.5-rc.1
 ```
 
-Linux GUI 依赖 Wayland/Vulkan/字体等系统库；Windows 包是原生 MSVC 构建；
-macOS 提供 Apple Silicon 与 Intel 两个原生包，但**未签名、未公证**。首次运行若被
-Gatekeeper 拦截，可在解压目录执行：
+### Linux 包：tar.gz 与 AppImage
+
+两个包内容一样（`tela-gui` + `tela-app`），系统库依赖也一样（Wayland / Vulkan / 字体，
+由发行版提供），区别只在分发方式：
 
 ```bash
-xattr -dr com.apple.quarantine .
-./tela-gui
+# tar.gz：解压后直接跑
+mkdir -p ~/.local/tela
+tar -xzf tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
+~/.local/tela/tela-gui
+
+# AppImage：单文件，chmod 之后就能运行
+chmod +x tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
+./tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
 ```
+
+- AppImage 需要 FUSE2 才能挂载：Arch `sudo pacman -S fuse2`、Debian/Ubuntu
+  `sudo apt install libfuse2t64`。
+- 没有 FUSE（容器、精简系统）时可以解压运行，只是启动慢一点：
+  `APPIMAGE_EXTRACT_AND_RUN=1 ./tela-desktop-….AppImage`，
+  或 `./tela-desktop-….AppImage --appimage-extract` 后跑 `squashfs-root/AppRun`。
+- 打包脚本见 `packaging/linux/`（`AppRun` + `.desktop` + 图标），
+  `release.yml` 打包前会用 `--check --demo` 跑一次产物冒烟。
 
 ### Windows 包是「解压即用」的
 
@@ -419,11 +483,33 @@ Visual C++ Redistributable。`release.yml` 在打包前会扫描两个 exe 的�
 > **v0.2.0 的 Windows 包没有静态 CRT**：双击会报
 > `VCRUNTIME140.dll was not found`。请直接用 v0.2.1 及之后的包。
 
+### macOS 包：Tela.app + ad-hoc 签名
+
+zip 里是真正的 app bundle（`Tela.app`，带图标、Dock 图标与菜单栏）外加命令行
+`tela-app`。签名用 `codesign -s -`（ad-hoc），**没有 Apple 开发者证书、也没有公证**，
+所以首次打开仍会被 Gatekeeper 拦一次：
+
+1. 解压，把 `Tela.app` 拖进「应用程序」；
+2. 双击会提示「无法打开」，点「完成」；
+3. 打开「系统设置 → 隐私与安全性」，页面下方有 Tela 的提示，点「仍要打开」并确认；
+   之后就能正常双击启动。
+
+> macOS 15（Sequoia）起，「右键 → 打开」不再能绕过 Gatekeeper，必须走第 3 步。
+> 也可以直接去掉隔离属性：`xattr -dr com.apple.quarantine /Applications/Tela.app`。
+
+想彻底免掉放行步骤，需要用 Developer ID 证书签名 + 公证（要 Apple Developer Program
+账号，每年 $99）；当前发布流程不涉及，`release.yml` 里只做 ad-hoc 签名，
+并对产物跑 `codesign --verify`，`spctl` 判定 rejected 是预期结果。
+
+启动没有控制台输出；失败原因写在 `~/.local/share/tela/tela-gui-error.log`
+（库文件同目录）。想跑演示数据：`open -a Tela --args --demo`。
+
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
 | [更新日志](./CHANGELOG.md) | 按版本记录桌面端的主要变化 |
+| [主题](./docs/themes.md) | 主题文件格式、内置主题、图标/字体/颜色/边框字段与本地保存位置 |
 | [真实 API 接入](./docs/real-api.md) | OAuth、同步/推送、正文/翻译、退出码、测试与下一步 |
 | [剩余工作盘点](./docs/remaining-work.md) | 对照 M0–M5 与 P0/P1 的逐项状态、估算与下一批切片 |
 | [API 方案（历史）](./docs/api-proposal.md) | 服务端公开 API 之前的调研与提议；现状以官方 v1 文档为准 |
@@ -443,7 +529,7 @@ Visual C++ Redistributable。`release.yml` 在打包前会扫描两个 exe 的�
 2. Unread / Today / Liked 列表与「全部已读 + 撤销」；
 3. 划线、文件夹、关注、OPML 的 UI；
 4. Discover / 站点 / 个人页 / 搜索（公共只读，`lang` 必带）；
-5. 缓存管理（容量上限、占用统计、清理入口）、阅读设置页（字号/主题）与自动更新。
+5. 缓存管理（容量上限、占用统计、清理入口）、阅读设置页（字号/行宽滑杆）与自动更新。
 
 ## 免责声明
 

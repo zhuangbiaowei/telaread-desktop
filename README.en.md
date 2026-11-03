@@ -4,12 +4,16 @@ A desktop reader for [Tela](https://telaread.com) (Rust + [GPUI Kit](https://git
 
 English | [简体中文](./README.md)
 
-> **Current status (v0.4.4)**: **The real API v1 foundation is wired up** — OAuth 2.1 + PKCE login, refresh
-> tokens stored in the OS credential store, full/incremental sync, an offline mutation queue,
-> local-first reading of bodies/translations/images, one-click per-subscription offline caching,
-> article recommendations and "My Recommendations", `Shift+B` bookmarking of any web page into
-> "My Bookmarks", automatic pause of translation polling when offline, a terminal CLI, and an
-> offline GUI demo.
+> **Current status (v0.4.5)**: **Themed UI on top of the real API v1 foundation** — three built-in themes
+> (Catppuccin Mocha / Latte, Paper) plus local TOML themes (icons, fonts, colors and borders all
+> configurable), applied immediately and restored on next launch; underneath is the wired-up real
+> API v1: OAuth 2.1 + PKCE login, refresh tokens stored in the OS credential store, full/incremental
+> sync, an offline mutation queue, local-first reading of bodies/translations/images, one-click
+> per-subscription offline caching, article recommendations and "My Recommendations", `Shift+B`
+> bookmarking of any web page into "My Bookmarks", automatic pause of translation polling when
+> offline, a terminal CLI, and an offline GUI demo.
+> A local release build installs a desktop entry with one command
+> (`packaging/linux/install-desktop-entry.sh`).
 > The protocol follows the official [authorization.md](https://github.com/hutusi/tela/blob/main/docs/api/authorization.md)
 > and [v1.md](https://github.com/hutusi/tela/blob/main/docs/api/v1.md) (read in full on 2026-10-28).
 > See [`docs/real-api.md`](./docs/real-api.md) for implementation details.
@@ -107,7 +111,7 @@ declares `rust-version = "1.92"`). `reqwest` uses rustls (aws-lc-rs), so the fir
 ```bash
 cargo build --workspace --locked                          # build
 cargo test --workspace --locked                           # all tests (including real API fixture contracts)
-cargo run -p tela-app -- --version                        # tela-app 0.4.4
+cargo run -p tela-app -- --version                        # tela-app 0.4.5
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -191,6 +195,14 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 - **X (Twitter) posts** are extracted structurally: the full long-post text (`note_tweet`) comes from the page's SSR data, the title is the first line of the post (truncated when long), and the body is split into paragraphs; a quoted post is appended as a blockquote. UI chrome such as "Post / Log in / Sign up" or an "Author on X" title never leaks into the article.
 - Bookmarked pages have no translation, so the reading panel shows the original only (no `Original | Compare | Translation` switcher); the `↗` next to the title still opens the original URL.
 
+### Themes
+
+- The bottom of the sidebar has a "Theme · current name" entry that opens the theme picker: built-in **Catppuccin Mocha** (dark), **Catppuccin Latte** (light) and **Paper** (warm paper, serif body text and book icons).
+- A theme is one set of three kinds of configuration: **icons** (feed, bookmark, article, recommendation, buttons, open-original, cache, add, remove, theme entry), **fonts and colors** (UI/body/heading/mono fonts, body size, line height, paragraph gap, and heading/link/code/quote/selection colors), and **border decorations** (borders, dividers, focus).
+- Selecting a theme applies immediately and writes `<data dir>/ui.toml`; the next launch starts with that theme on the first frame (no flash of the default palette). Themes are local settings and are never synced to the account.
+- To create one, drop a TOML file at `<data dir>/themes/<id>.toml`; the file name is the theme id, and the same id overrides the built-in theme. "Rescan" in the picker reloads files without a restart; a broken file is reported at the bottom of the picker and never prevents startup.
+- The full format (icon names, fonts, colors, border fields and ranges) is in [docs/themes.md](./docs/themes.md) (Chinese).
+
 ### Offline cache and loading strategy
 
 - **Local first**: bodies, translations and images are written to SQLite after the first successful fetch; opening the same article later reads the cached body, translation and images directly, without calling `/v1/bodies`, `/v1/translations` or `/img/…` again.
@@ -214,7 +226,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 
 - Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog; `Shift+B` bookmark a URL (opens the "Bookmark web page" modal).
 - Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry.
-- Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable.
+- Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable; the "Theme" entry at the bottom of the sidebar opens the theme picker.
 
 ### Demo mode
 
@@ -225,7 +237,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 
 ### Current limitations
 
-- The UI is fixed to a dark theme; there is no font-size / line-width / theme settings page.
+- Themes are selectable (built-in dark/light/paper plus local theme files), but there is no font-size / line-width slider settings page; size and line height are currently edited in the theme file.
 - Only per-subscription article lists exist; there are no cross-subscription Unread / Today / Liked views.
 - There is no periodic background sync; currently it syncs once at startup and again after sign-in, mark-as-read and similar actions.
 - There is no search, Discover, folders, highlights/notes, OPML or auto-update entry point.
@@ -293,6 +305,7 @@ Dependencies flow in one direction: `tela-app → {tela-ui, tela-sync} → {tela
 | `crates/tela-app` | Wiring (`services.rs`), local cache layer (`content_cache.rs`), terminal CLI, GPUI entry point |
 | `tests/fixtures/api/` | Official v1 sample response bodies (sync/mutations/me/usage/meta/translation) |
 | `tests/fixtures/content/` | Body and translation object fixtures (including image URLs) |
+| `packaging/` | Packaging assets for releases: `macos/` (`Info.plist` + icon), `linux/` (AppRun + `.desktop` + icon + local desktop-entry installer) |
 
 ### Key semantics
 
@@ -306,6 +319,33 @@ Dependencies flow in one direction: `tela-app → {tela-ui, tela-sync} → {tela
 
 See [`docs/real-api.md`](./docs/real-api.md) for a fuller interface mapping, error codes and security notes.
 
+## Local release build and desktop entry (Linux / Omarchy)
+
+To run a release build locally instead of publishing, one command is enough:
+
+```bash
+./packaging/linux/install-desktop-entry.sh             # build release + install desktop entry
+./packaging/linux/install-desktop-entry.sh --no-build  # reinstall entry only (reuse binaries)
+./packaging/linux/install-desktop-entry.sh --uninstall # remove entry (keeps target/ and DB)
+```
+
+Then on Omarchy press `SUPER + SPACE` (launcher) → type `tela` → Enter; the menu also gains a
+"Tela Desktop" item. The script produces four things:
+
+| Artifact | Purpose |
+|---|---|
+| `target/release/tela-gui` + `tela-app` | the actual binaries (`--features gui --bin tela-gui`) |
+| `~/.local/bin/tela-desktop` | launcher: probes local proxy, sources `tmp/tela.env`, logs output, builds on demand |
+| `~/.local/share/applications/tela-desktop.desktop` | desktop entry (`StartupWMClass=tela-desktop`, matching GPUI's `app_id`) |
+| `~/.local/share/icons/hicolor/512x512/apps/tela-desktop.png` | icon |
+
+- Log: `~/.local/state/tela-desktop.log` (the launcher has no terminal, so failures only show up there).
+- Debug build: `TELA_PROFILE=debug tela-desktop`; different repo path: `TELA_PROJECT_ROOT=/path/to/repo tela-desktop`.
+- Manual equivalent: `cargo build --release -p tela-app --features gui --bin tela-gui --locked`.
+- To make `SUPER + SPACE` launch Tela **directly** (instead of opening the launcher), add
+  `o.bind("SUPER + SPACE", "Tela", "tela-desktop")` to `~/.config/hypr/bindings.lua`
+  (either that or the default `omarchy-menu toggle`; binding both conflicts).
+
 ## Release
 
 Releases are automated by [`release.yml`](./.github/workflows/release.yml):
@@ -313,36 +353,52 @@ Releases are automated by [`release.yml`](./.github/workflows/release.yml):
 ```bash
 # after removing the v prefix, the tag must equal tela-app's version in Cargo.toml
 # the TELA_CLIENT_ID repository variable must be configured before building (release packages embed it)
-git tag -a v0.4.4 -m "Tela Desktop v0.4.4"
-git push origin v0.4.4
+git tag -a v0.4.5 -m "Tela Desktop v0.4.5"
+git push origin v0.4.5
 ```
 
 After pushing the tag:
 
 1. Validate the tag/version and run the full test suite on Linux;
 2. Build `tela-app` and `tela-gui` natively on `ubuntu-24.04`, `windows-latest`, `macos-15` (Apple Silicon) and `macos-15-intel` (Intel);
-3. Produce
-   `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz`,
-   `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip`,
-   `tela-desktop-<tag>-aarch64-apple-darwin.tar.gz`,
-   `tela-desktop-<tag>-x86_64-apple-darwin.tar.gz` and the corresponding `.sha256` files;
+3. Produce the following artifacts (each with a `.sha256`):
+   - Linux: `tela-desktop-<tag>-x86_64-unknown-linux-gnu.tar.gz` and
+     `tela-desktop-<tag>-x86_64-unknown-linux-gnu.AppImage`;
+   - Windows: `tela-desktop-<tag>-x86_64-pc-windows-msvc.zip`;
+   - macOS: `tela-desktop-<tag>-aarch64-apple-darwin.zip` and
+     `tela-desktop-<tag>-x86_64-apple-darwin.zip` (containing `Tela.app`);
 4. Create the GitHub Release (with auto-generated release notes).
 
 Pre-releases use a hyphenated tag and are automatically marked as prerelease:
 
 ```bash
-git tag -a v0.4.4-rc.1 -m "Tela Desktop v0.4.4-rc.1"
-git push origin v0.4.4-rc.1
+git tag -a v0.4.5-rc.1 -m "Tela Desktop v0.4.5-rc.1"
+git push origin v0.4.5-rc.1
 ```
 
-The Linux GUI depends on Wayland/Vulkan/font system libraries; the Windows package is a native
-MSVC build; macOS ships both Apple Silicon and Intel native packages, but they are **unsigned and
-not notarized**. If Gatekeeper blocks the first run, run this in the unpacked directory:
+### Linux packages: tar.gz and AppImage
+
+Both ship the same binaries (`tela-gui` + `tela-app`) and need the same system libraries
+(Wayland / Vulkan / fonts, provided by the distribution); only the distribution format differs:
 
 ```bash
-xattr -dr com.apple.quarantine .
-./tela-gui
+# tar.gz: unpack and run
+mkdir -p ~/.local/tela
+tar -xzf tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
+~/.local/tela/tela-gui
+
+# AppImage: a single file, just make it executable
+chmod +x tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
+./tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
 ```
+
+- AppImages need FUSE2 to mount: `sudo pacman -S fuse2` on Arch,
+  `sudo apt install libfuse2t64` on Debian/Ubuntu.
+- Without FUSE (containers, minimal systems) you can extract and run:
+  `APPIMAGE_EXTRACT_AND_RUN=1 ./tela-desktop-….AppImage`, or
+  `./tela-desktop-….AppImage --appimage-extract` followed by `squashfs-root/AppRun`.
+- Packaging lives in `packaging/linux/` (`AppRun` + `.desktop` + icon); before packaging,
+  `release.yml` smoke-tests the artifact with `--check --demo`.
 
 ### The Windows package is "unpack and run"
 
@@ -362,11 +418,35 @@ To browse demo data offline, use `tela-gui.exe --demo`.
 > **The v0.2.0 Windows package did not use a static CRT**: double-clicking it reports
 > `VCRUNTIME140.dll was not found`. Use v0.2.1 or later instead.
 
+### macOS package: Tela.app with an ad-hoc signature
+
+The zip contains a real app bundle (`Tela.app`, with an icon, Dock icon and menu bar) plus the
+`tela-app` command-line binary. It is signed ad-hoc (`codesign -s -`) — **no Apple Developer
+certificate and no notarization** — so Gatekeeper still blocks the first launch:
+
+1. Unzip and drag `Tela.app` into Applications;
+2. Double-clicking shows "cannot be opened"; click Done;
+3. Open System Settings → Privacy & Security, find the Tela entry near the bottom, click
+   "Open Anyway" and confirm. After that, double-clicking works normally.
+
+> Since macOS 15 (Sequoia) the old "right-click → Open" bypass no longer works; step 3 is required.
+> You can also drop the quarantine attribute directly:
+> `xattr -dr com.apple.quarantine /Applications/Tela.app`.
+
+Removing that step entirely requires Developer ID signing plus notarization (an Apple Developer
+Program membership, $99/year); the current pipeline does not do it. `release.yml` only signs
+ad-hoc and runs `codesign --verify` on the artifact — an `spctl` verdict of rejected is expected.
+
+There is no console output on startup; failures are logged to
+`~/.local/share/tela/tela-gui-error.log` (next to the database). For demo data:
+`open -a Tela --args --demo`.
+
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [Changelog](./CHANGELOG.md) | Notable desktop changes by version |
+| [Themes](./docs/themes.md) | Theme file format, built-in themes, icon/font/color/border fields and where they are stored (Chinese) |
 | [Real API integration](./docs/real-api.md) | OAuth, sync/push, bodies/translation, exit codes, tests and next steps |
 | [Remaining work inventory](./docs/remaining-work.md) | Per-item status against M0–M5 and P0/P1, estimates and the next batch of slices |
 | [API proposal (historical)](./docs/api-proposal.md) | Research and proposal before the public server API; the official v1 docs are authoritative |
@@ -386,7 +466,7 @@ To browse demo data offline, use `tela-gui.exe --demo`.
 2. Unread / Today / Liked lists and "mark all read + undo";
 3. UI for highlights, folders, following and OPML;
 4. Discover / sites / profiles / search (public read-only; `lang` is mandatory);
-5. Cache management (size limit, usage statistics, cleanup entry point), a reading settings page (font size/theme) and auto-update.
+5. Cache management (size limit, usage statistics, cleanup entry point), a reading settings page (font-size/line-width sliders) and auto-update.
 
 ## Disclaimer
 
