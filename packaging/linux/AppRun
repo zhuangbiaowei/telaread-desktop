@@ -1,0 +1,16 @@
+#!/bin/sh
+# AppImage 入口：把调用转给包内的 tela-gui。
+#
+# AppImage 运行时会把 $APPDIR 指向挂载点，这里用 $0 反推自己的目录，
+# 这样解包（--appimage-extract）之后直接跑 ./squashfs-root/AppRun 也能工作。
+set -eu
+
+HERE=$(dirname "$(readlink -f "$0")")
+
+# AppImage 挂载时 $PWD 是用户当前目录，GPUI 需要在有 X11/Wayland 的会话里启动；
+# 只做一次很轻的提示，真正的失败信息仍然由 tela-gui 自己写到数据目录的日志里。
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "tela: 没有检测到 DISPLAY / WAYLAND_DISPLAY，GUI 可能无法启动（冒烟测试可用 --check）" >&2
+fi
+
+exec "$HERE/usr/bin/tela-gui" "$@"

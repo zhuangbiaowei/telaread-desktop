@@ -3,8 +3,16 @@
 # 流程：
 #   1. verify：校验 tag 与 Cargo 版本一致，并在 Linux 上跑完整测试；
 #   2. build：ubuntu-24.04 + windows-latest + macOS（Apple Silicon / Intel）
-#      原生构建 tela-app / tela-gui；
-#   3. release：汇总四个平台的压缩包，创建 GitHub Release。
+#      原生构建 tela-app / tela-gui，并各自打包：
+#        - Linux：tar.gz（解压即用）+ AppImage（单文件，带桌面集成）；
+#        - Windows：zip（静态 CRT，解压即用）；
+#        - macOS：Tela.app bundle + ad-hoc 签名，装进 zip；
+#   3. release：汇总四个平台的产物，创建 GitHub Release。
+#
+# macOS 只做 ad-hoc 签名（`codesign -s -`），不需要 Apple 开发者账号，但
+# **过不了 Gatekeeper**：下载后仍要在「系统设置 → 隐私与安全性」里放行一次，
+# 详见 README 的「发布」小节。正式签名 + 公证需要 Developer ID 证书，
+# 本 workflow 不涉及。
 #
 # 约定：
 #   - tag 形如 v0.2.0；预发布可用 v0.2.0-rc.1（自动标记 prerelease）；
@@ -83,6 +91,7 @@ jobs:
     timeout-minutes: 60
     env:
       MATRIX_TARGET: ${{ matrix.target }}
+      MATRIX_ARCHIVE: ${{ matrix.archive }}
       # 编译期注入 public client id（见 tela-app 的 DEFAULT_CLIENT_ID）：
       # 用户解压后直接是登录模式，不需要自己注册 client id。
       TELA_CLIENT_ID: ${{ vars.TELA_CLIENT_ID }}
@@ -100,10 +109,10 @@ jobs:
           # runner 上交叉编译 x86_64，GPUI / WGPU / aws-lc 的 C 依赖更容易踩坑。
           - os: macos-15
             target: aarch64-apple-darwin
-            archive: tar.gz
+            archive: zip
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            archive: tar.gz
+            archive: zip
     steps:
       - uses: actions/checkout@v4
 
@@ -190,8 +199,11 @@ jobs:
           }
           Write-Host 'OK: tela-app.exe / tela-gui.exe 均不引用 VC++ 运行库 DLL。'
 
-      - name: Package (Linux / macOS)
-        if: runner.os != 'Windows'
+      # ---------------------------------------------------------------
+      # Linux：tar.gz（脚本 / CI 用法）与 AppImage（桌面单文件）并存
+      # ---------------------------------------------------------------
+      - name: Package (Linux, tar.gz)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -201,12 +213,116 @@ jobs:
           chmod +x dist/package/tela-app dist/package/tela-gui
           name="tela-desktop-${GITHUB_REF_NAME}-${MATRIX_TARGET}.tar.gz"
           tar -C dist/package -czf "dist/${name}" .
-          # macOS runner 默认只有 BSD 的 shasum，没有 sha256sum。
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "${name}" > "${name}.sha256")
-          else
-            (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+
+      # AppImage = squashfs + 自带运行时，用户下载后 chmod +x 就能双击运行，
+      # 不需要解压、不需要把二进制留在某个目录里。系统库（Vulkan / 字体 /
+      # Wayland）仍然由宿主提供，和 tar.gz 的依赖完全一致。
+      - name: Package (Linux, AppImage)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 临时产物放 RUNNER_TEMP：dist/ 会被整目录上传成 release asset，
+          # appimagetool 和 AppDir 不能混进去。
+          appdir="${RUNNER_TEMP}/Tela.AppDir"
+          tool="${RUNNER_TEMP}/appimagetool"
+          rm -rf "$appdir"
+          mkdir -p "$appdir/usr/bin" \
+                   "$appdir/usr/share/applications" \
+                   "$appdir/usr/share/icons/hicolor/512x512/apps"
+          cp target/release/tela-app target/release/tela-gui "$appdir/usr/bin/"
+          install -m755 packaging/linux/AppRun "$appdir/AppRun"
+          install -m644 packaging/linux/tela-desktop.desktop "$appdir/tela-desktop.desktop"
+          install -m644 packaging/linux/tela-desktop.desktop \
+            "$appdir/usr/share/applications/tela-desktop.desktop"
+          install -m644 packaging/linux/tela-desktop.png "$appdir/tela-desktop.png"
+          cp "$appdir/tela-desktop.png" "$appdir/.DirIcon"
+          install -m644 packaging/linux/tela-desktop.png \
+            "$appdir/usr/share/icons/hicolor/512x512/apps/tela-desktop.png"
+
+          if command -v desktop-file-validate >/dev/null 2>&1; then
+            desktop-file-validate "$appdir/tela-desktop.desktop"
           fi
+
+          # 有些环境（含本机的 umask 077）会把新建目录建成 0700，appimagetool
+          # 会直接判失败。统一放开读/进入权限；a+rX 不会给普通文件加执行位。
+          chmod -R a+rX "$appdir"
+
+          # 官方 continuous 构建；runner 上没有 libfuse2，用
+          # APPIMAGE_EXTRACT_AND_RUN=1 让 appimagetool 自己解包运行。
+          curl -fsSL -o "$tool" \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x "$tool"
+          name="tela-desktop-${GITHUB_REF_NAME}-${MATRIX_TARGET}.AppImage"
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$tool" --no-appstream \
+            "$appdir" "dist/${name}"
+          chmod +x "dist/${name}"
+          (cd dist && sha256sum "${name}" > "${name}.sha256")
+
+          # 护栏：产物真的能启动。--check 不建窗口，只装配服务 + 读一次列表。
+          # TELA_DB 指到 RUNNER_TEMP，避免往 $HOME 里写库。
+          TELA_DB="${RUNNER_TEMP}/appimage-check.db" \
+            APPIMAGE_EXTRACT_AND_RUN=1 "dist/${name}" --check --demo
+
+      # ---------------------------------------------------------------
+      # macOS：打成 Tela.app（Info.plist + 图标），并做 ad-hoc 签名
+      # ---------------------------------------------------------------
+      - name: Build Tela.app bundle (macOS, ad-hoc signed)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          version="${version%%-*}"
+          app="${RUNNER_TEMP}/Tela.app"
+          iconset="${RUNNER_TEMP}/AppIcon.iconset"
+          rm -rf "$app" "$iconset"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/tela-gui "$app/Contents/MacOS/tela-gui"
+          sed -e "s/__VERSION__/${version}/g" packaging/macos/Info.plist \
+            > "$app/Contents/Info.plist"
+          plutil -lint "$app/Contents/Info.plist"
+
+          # 1024px 源图 → .iconset → AppIcon.icns（iconutil 只在 macOS 上有）。
+          mkdir -p "$iconset"
+          for spec in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 \
+                      256:128x128@2x 256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x; do
+            size="${spec%%:*}"
+            sips -z "$size" "$size" packaging/macos/icon.png \
+              --out "$iconset/icon_${spec#*:}.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+          printf 'APPL????' > "$app/Contents/PkgInfo"
+
+          # ad-hoc 签名：先签最里层的可执行文件，再签 bundle 本身。
+          codesign --force --sign - --timestamp=none "$app/Contents/MacOS/tela-gui"
+          codesign --force --sign - --timestamp=none "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | sed -n '1,10p'
+
+          # 预期结果：spctl 判定 rejected —— ad-hoc 签名满足不了 Gatekeeper，
+          # 用户首次打开要手动放行（见 README「macOS 包」）。这里只记录，不判失败。
+          echo "预期 spctl 为 rejected（ad-hoc 签名，未公证）："
+          spctl -a -vvv --type execute "$app" 2>&1 | sed 's/^/  /' || true
+
+      - name: Package (macOS, zip with .app)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/package
+          # 用 ditto 而不是 cp -R：保留 .app 里的扩展属性与 _CodeSignature。
+          ditto "${RUNNER_TEMP}/Tela.app" dist/package/Tela.app
+          codesign --verify --strict --verbose=2 dist/package/Tela.app
+          cp target/release/tela-app README.md LICENSE-MIT LICENSE-APACHE dist/package/
+          chmod +x dist/package/tela-app
+          codesign --force --sign - --timestamp=none dist/package/tela-app
+          name="tela-desktop-${GITHUB_REF_NAME}-${MATRIX_TARGET}.zip"
+          # ditto 保留 .app 里的执行位与 _CodeSignature，用 tar/zip 容易丢；
+          # 不加 --keepParent，解压后直接是 Tela.app 而不是多一层目录。
+          ditto -c -k --sequesterRsrc dist/package "dist/${name}"
+          (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
@@ -223,7 +339,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.target }}
-          path: dist/*
+          # 只传最终产物：dist/package/ 是打包暂存目录，传上去只会让
+          # artifact 变大，还可能被当成 release asset。
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.AppImage
+            dist/*.sha256
           if-no-files-found: error
           retention-days: 7
 

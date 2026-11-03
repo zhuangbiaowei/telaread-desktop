@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Tela
+GenericName=Reader
+GenericName[zh_CN]=阅读器
+Comment=Read, translate and sync your Tela feeds
+Comment[zh_CN]=阅读、翻译并同步 Tela 订阅
+Exec=tela-gui %U
+Icon=tela-desktop
+Terminal=false
+Categories=Network;News;
+Keywords=tela;reader;feed;rss;
+StartupNotify=true

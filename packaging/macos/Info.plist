@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Tela.app 的 Info.plist 模板。
+
+  release.yml 里的 macOS 打包步骤会用 tag 版本号替换 __VERSION__，写到
+  Tela.app/Contents/Info.plist。改这里的键时同步检查 README 的「发布」小节。
+
+  - CFBundleExecutable 必须与 Contents/MacOS/ 下的文件名一致（tela-gui）。
+  - CFBundleIconFile 不带 .icns 后缀（老版本 macOS 的兼容写法，新系统两者都认）。
+  - LSMinimumSystemVersion：GPUI 走 Metal / WGPU，低于 11 的系统跑不起来。
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>Tela</string>
+	<key>CFBundleExecutable</key>
+	<string>tela-gui</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.zhuangbiaowei.tela</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Tela</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__VERSION__</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.news</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<string>true</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>MIT OR Apache-2.0</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+</dict>
+</plist>

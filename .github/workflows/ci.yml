@@ -44,11 +44,12 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
-      # keyring 的 Linux Secret Service 后端需要 dbus-1.pc；aws-lc-rs 需要 cmake/clang。
+      # keyring 的 Linux Secret Service 后端需要 dbus-1.pc；aws-lc-rs 需要 cmake/clang；
+      # desktop-file-utils 用于校验 packaging/ 里的 .desktop。
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config cmake clang
+          sudo apt-get install -y libdbus-1-dev pkg-config cmake clang desktop-file-utils
 
       - name: Show toolchain (避免版本漂移后无法归因)
         run: cargo --version && rustc --version && cargo clippy --version && rustfmt --version
@@ -67,6 +68,16 @@ jobs:
 
       - name: CLI entry smoke (M0 验收第 4 条)
         run: cargo run -p tela-app --locked -- --version
+
+      # 打包素材（macOS Info.plist / Linux .desktop + AppRun）只在打 tag 时用到，
+      # 但写错了要等到发版才暴露。这里做最基本的语法/权限校验。
+      - name: Validate packaging assets
+        run: |
+          set -euxo pipefail
+          desktop-file-validate packaging/linux/tela-desktop.desktop
+          python3 -c "import plistlib; plistlib.load(open('packaging/macos/Info.plist', 'rb'))"
+          test -x packaging/linux/AppRun
+          test -f packaging/macos/icon.png
 
   gui:
     name: gui (gpui-kit, headless tests)
