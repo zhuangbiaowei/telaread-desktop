@@ -335,6 +335,110 @@ fn bookmarking_the_same_url_twice_refreshes_one_row() {
     assert_eq!(services.list_bookmarks().unwrap().len(), 1);
 }
 
+/// 网页在第一次收藏之后又改过：正文、标题都不一样了。
+const BOOKMARK_HTML_UPDATED: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <title>Saved Page, Updated</title>
+    <meta property="og:site_name" content="Example Blog">
+  </head>
+  <body>
+    <article>
+      <h1>Saved Page, Updated</h1>
+      <p>This paragraph was edited after the page was bookmarked, so the local
+         cache still holds the previous version until it is refreshed.</p>
+      <p>Second paragraph, with a correction.</p>
+    </article>
+  </body>
+</html>"#;
+
+/// 收藏正文渲染出的 HTML（断言正文变化用）。
+fn bookmark_html(services: &AppServices, bookmark_id: i64) -> String {
+    let request = services.bookmark_request_for(bookmark_id).unwrap();
+    services
+        .content()
+        .load_chapter(&request)
+        .expect("读收藏正文")
+        .content
+        .blocks
+        .iter()
+        .map(|block| block.html.as_str())
+        .collect()
+}
+
+#[test]
+fn refreshing_a_bookmark_replaces_the_cached_body_when_the_page_changed() {
+    let services =
+        AppServices::open_in_memory("zh-Hans", content(), Arc::new(MockTransport::new())).unwrap();
+    let item = save_test_bookmark(&services, "https://example.com/saved-page");
+    let before = bookmark_html(&services, item.id);
+    assert!(before.contains("Second paragraph"));
+    assert!(!before.contains("edited after the page was bookmarked"));
+
+    let page =
+        tela_content::webpage::parse_html("https://example.com/saved-page", BOOKMARK_HTML_UPDATED);
+    let refresh = services
+        .refresh_bookmark_page(item.id, &page)
+        .expect("refresh bookmark");
+
+    assert!(refresh.changed, "网页正文变了，应报告 changed");
+    assert_eq!(refresh.item.id, item.id, "刷新不能新建一条收藏");
+    assert_eq!(
+        refresh.item.created_at, item.created_at,
+        "刷新保留最初的收藏时间"
+    );
+    assert_eq!(refresh.item.title, "Saved Page, Updated");
+    assert_eq!(services.list_bookmarks().unwrap().len(), 1);
+
+    // 正文 key 没变（还是同一个 URL），但本地 Markdown 已经换成新的一版。
+    let request = services.bookmark_request_for(item.id).unwrap();
+    assert_eq!(
+        request.content_key,
+        tela_content::webpage::content_key_for_url(&item.url)
+    );
+    let after = bookmark_html(&services, item.id);
+    assert!(
+        after.contains("edited after the page was bookmarked"),
+        "{after}"
+    );
+    assert!(
+        !after.contains("so the reader has something real"),
+        "旧正文应被替换：{after}"
+    );
+}
+
+#[test]
+fn refreshing_an_unchanged_bookmark_keeps_the_cache() {
+    let services =
+        AppServices::open_in_memory("zh-Hans", content(), Arc::new(MockTransport::new())).unwrap();
+    let item = save_test_bookmark(&services, "https://example.com/saved-page");
+    let before = bookmark_html(&services, item.id);
+
+    // 同一个页面再抓一次：Markdown 与标题都没变。
+    let page = tela_content::webpage::parse_html("https://example.com/saved-page", BOOKMARK_HTML);
+    let refresh = services
+        .refresh_bookmark_page(item.id, &page)
+        .expect("refresh bookmark");
+
+    assert!(!refresh.changed, "页面没变时不应该重写缓存");
+    assert_eq!(refresh.item, item);
+    assert_eq!(bookmark_html(&services, item.id), before);
+}
+
+#[test]
+fn refreshing_an_unknown_bookmark_is_an_error() {
+    let services =
+        AppServices::open_in_memory("zh-Hans", content(), Arc::new(MockTransport::new())).unwrap();
+    let page = tela_content::webpage::parse_html("https://example.com/saved-page", BOOKMARK_HTML);
+    let error = services
+        .refresh_bookmark_page(404, &page)
+        .expect_err("不存在的收藏不能被刷新");
+    assert!(
+        matches!(error, TelaError::Content { article: 404, .. }),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn removing_a_bookmark_clears_its_markdown() {
     let services =

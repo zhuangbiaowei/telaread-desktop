@@ -52,6 +52,8 @@ pub enum ReaderEvent {
         /// 变化的文章 id。
         article_id: i64,
     },
+    /// 用户按了 `Shift+R`：请求上层从来源（网页或同步）重新拉取当前内容。
+    RefreshRequested,
 }
 
 /// 推荐弹窗的临时状态：说明文字输入框与打开时是否已推荐。
@@ -380,20 +382,23 @@ impl ReaderView {
 
     /// 重试当前文章（后台取数）。
     ///
-    /// 如果上次连 `chapter_request` 都失败了（request 为空），重试会先重新解析
-    /// 文章 → 正文 key；这样“服务端还没就绪”之类的暂时性错误恢复后无需重新选文章。
+    /// 每次都会重新从数据源取一次正文请求：文章可能因为服务端重新抽取而换了
+    /// `contentKey`，收藏的网页也可能刚刚被刷新（本地正文已更新）。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         if let Some(bookmark_id) = self.bookmark_id {
-            if self.session.request().content_key.is_empty() {
-                match self.data.bookmark_request(bookmark_id) {
-                    Ok(request) => self.session.reset_to(request),
-                    Err(error) => {
-                        self.session.mark_retry();
-                        self.session.apply_load_result(Err(error));
-                        self.rebuild_rendered_rows();
-                        cx.notify();
-                        return;
+            match self.data.bookmark_request(bookmark_id) {
+                Ok(request) => {
+                    if request.content_key != self.session.request().content_key {
+                        // 正文 key 变了：换请求并回到开头；同一 key 则保留阅读位置。
+                        self.session.reset_to(request);
                     }
+                }
+                Err(error) => {
+                    self.session.mark_retry();
+                    self.session.apply_load_result(Err(error));
+                    self.rebuild_rendered_rows();
+                    cx.notify();
+                    return;
                 }
             }
             self.session.mark_retry();
@@ -406,6 +411,11 @@ impl ReaderView {
         let Some(article_id) = self.article_id else {
             return;
         };
+        if let Ok(request) = self.data.chapter_request(article_id)
+            && request.content_key != self.session.request().content_key
+        {
+            self.session.reset_to(request);
+        }
         if self.session.request().content_key.is_empty() {
             match self.data.chapter_request(article_id) {
                 Ok(request) => self.session.reset_to(request),
@@ -422,6 +432,31 @@ impl ReaderView {
         self.forget_translation_request();
         self.translation_notice = None;
         self.translation_task = None;
+        self.session.mark_retry();
+        self.session.begin_load();
+        self.rebuild_rendered_rows();
+        self.spawn_load(cx);
+        cx.notify();
+    }
+
+    /// 同步拉到了新的文章行时：正文 key 变了就重新取一次正文。
+    ///
+    /// 网页端更新文章后，Tela 会重新抽取正文并下发新的 `contentKey`；
+    /// 当前正打开这篇文章时不能继续显示旧缓存，必须无感地换成新正文。
+    pub fn reload_if_content_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(article_id) = self.article_id else {
+            return;
+        };
+        let Ok(request) = self.data.chapter_request(article_id) else {
+            return;
+        };
+        if request.content_key == self.session.request().content_key {
+            return;
+        }
+        self.forget_translation_request();
+        self.translation_notice = None;
+        self.translation_task = None;
+        self.session.reset_to(request);
         self.session.mark_retry();
         self.session.begin_load();
         self.rebuild_rendered_rows();
@@ -1159,10 +1194,11 @@ impl ReaderView {
                     .text_xs()
                     .text_color(hsla(colors.muted))
                     .child(if is_bookmark {
-                        "Shift+B 继续收藏 · j/k 文章 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                        "Shift+R 检查更新 · Shift+B 继续收藏 · j/k 文章 · \
+                         ↑/↓ 逐行 · PgUp/PgDn 滚动"
                     } else {
                         "o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · Shift+B 收藏网址 · \
-                         ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                         Shift+R 刷新 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
                     }),
             )
     }
@@ -1731,6 +1767,15 @@ impl Render for ReaderView {
             .track_focus(&self.focus)
             .focusable()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                // `Shift+R` 交给上层从来源刷新（收藏网页重新抓取、文章重新同步）；
+                // 单独的 `r` 仍然是本地缓存上的重试。
+                if event.keystroke.key.eq_ignore_ascii_case("r") && event.keystroke.modifiers.shift
+                {
+                    if !this.input_locked && this.recommend_dialog.is_none() {
+                        cx.emit(ReaderEvent::RefreshRequested);
+                    }
+                    return;
+                }
                 if this.handle_key(&event.keystroke.key, cx) {
                     cx.notify();
                 }

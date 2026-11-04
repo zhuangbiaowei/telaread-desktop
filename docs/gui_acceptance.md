@@ -134,12 +134,19 @@
   隐藏 `o/c/t`、状态行显示「收藏的网页 · 共 N 段」。图片仍按 Markdown 里的绝对地址从
   `cached_images` 读取，离线可显示。
 - 侧栏在「我的推荐」下方新增「我的收藏」入口（显示条数）；中间栏列出标题、站点、日期、
-  图片数与网址，行内「移除」删除收藏并清理只被它引用的正文；删除正在阅读的收藏会让阅读面板
-  回到空态。
+  图片数与网址，行内「刷新」重新抓取网页、行内「移除」删除收藏并清理只被它引用的正文；
+  删除正在阅读的收藏会让阅读面板回到空态。
+- **网页更新同步到本地缓存**：选中收藏时先读本地 Markdown 立即显示，同时在后台重新抓取
+  网页（同一篇 60 秒内只检查一次，`BOOKMARK_REVALIDATE_INTERVAL`）；正文/标题变了就覆盖
+  `documents`、更新收藏行并让阅读面板重载，没变则不重写缓存。离线或抓取失败保留旧正文。
+  `Shift+R`（阅读面板）与收藏行的「刷新」按钮可立即检查；`BookmarkService::refresh_bookmark`
+  返回 `BookmarkRefresh { item, changed }`。
 - 验收：`webpage` 15 passed / 5 ignored（真实网络冒烟：普通网页、公众号文章、X 帖子、X 文章/文章帖子地址）、
   `markdown`（tela-content lib）14 passed、`store_v2` 19 passed、`shell_view_model` 14 passed、
-  `gui_shell` 9 passed（含 `Shift+B` → 输入 → 提交 → 列表/阅读）、
-  `services_v2` 17 passed / 5 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、X 文章、带图页面/图片缓存）、截图 2 张。
+  `gui_shell` 13 passed（含 `Shift+B` → 输入 → 提交 → 列表/阅读、打开收藏自动检查更新、
+  `Shift+R` 强制刷新、网页更新写回列表与阅读面板、同步只换 contentKey 时重载正文）、
+  `services_v2` 20 passed / 5 ignored（真实网络端到端：普通网页、公众号文章、X 帖子、X 文章、
+  带图页面/图片缓存；离线单测：刷新替换缓存、未变化不重写、收藏不存在报错）、截图 2 张。
 
 ### S9 主题（2026-11-03）
 

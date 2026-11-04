@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -23,7 +24,6 @@ use tela_ui::shell::ShellData;
 struct FakeData {
     content_key: String,
 }
-
 impl ShellData for FakeData {
     fn feeds(&self) -> Result<Vec<tela_ui::shell::FeedItem>, TelaError> {
         Ok(Vec::new())
@@ -45,6 +45,57 @@ fn data(content_key: &str) -> Arc<dyn ShellData> {
     Arc::new(FakeData {
         content_key: content_key.to_string(),
     })
+}
+
+/// 正文 key 可以在测试中途变化，模拟“同步拿到了服务端重新抽取的正文”。
+struct MutableData {
+    content_key: Arc<Mutex<String>>,
+}
+
+impl ShellData for MutableData {
+    fn feeds(&self) -> Result<Vec<tela_ui::shell::FeedItem>, TelaError> {
+        Ok(Vec::new())
+    }
+
+    fn articles(&self, _feed_id: i64) -> Result<Vec<tela_ui::shell::ArticleItem>, TelaError> {
+        Ok(Vec::new())
+    }
+
+    fn chapter_request(&self, _article_id: i64) -> Result<ChapterRequest, TelaError> {
+        let key = self.content_key.lock().expect("content key").clone();
+        Ok(ChapterRequest::new(key, "zh-Hans".to_string()))
+    }
+}
+
+#[gpui::test]
+fn content_key_change_after_sync_reloads_the_body(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let key = Arc::new(Mutex::new(MOCK_CONTENT_KEY.to_string()));
+    let data: Arc<dyn ShellData> = Arc::new(MutableData {
+        content_key: Arc::clone(&key),
+    });
+    let content: Arc<dyn ContentApi> = Arc::new(MockContentApi::new());
+    let reader = cx.new(|cx| ReaderView::new(data, content, cx));
+    reader.update(cx, |reader, cx| {
+        reader.select(42, "Hello Tela".to_string(), None, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        reader.read_with(cx, |reader, _| reader.session().total_paragraphs()),
+        5
+    );
+
+    // 服务端重新抽取了正文 → 同步后的文章行换了 contentKey。
+    *key.lock().unwrap() = MOCK_LONG_CONTENT_KEY.to_string();
+    reader.update(cx, |reader, cx| reader.reload_if_content_changed(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        reader.read_with(cx, |reader, _| reader.session().total_paragraphs()),
+        120,
+        "contentKey 变了必须换上新的正文，不能继续显示旧缓存"
+    );
 }
 
 #[gpui::test]

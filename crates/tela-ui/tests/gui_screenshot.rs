@@ -134,6 +134,15 @@ impl BookmarkService for StubBookmarks {
     fn remove_bookmark(&self, _bookmark_id: i64) -> Result<(), TelaError> {
         Ok(())
     }
+
+    fn refresh_bookmark(
+        &self,
+        _bookmark_id: i64,
+    ) -> Result<tela_ui::shell::BookmarkRefresh, TelaError> {
+        Err(TelaError::Config {
+            detail: "截图模式不联网检查更新".to_string(),
+        })
+    }
 }
 
 fn screenshot_dir() -> std::path::PathBuf {

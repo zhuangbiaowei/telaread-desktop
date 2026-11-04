@@ -176,6 +176,8 @@ pub struct IconSet {
     pub add: String,
     /// 移除/取消。
     pub remove: String,
+    /// 刷新/检查更新。
+    pub refresh: String,
     /// 主题/外观入口。
     pub theme: String,
 }
@@ -192,6 +194,7 @@ impl Default for IconSet {
             cache: "download".to_string(),
             add: "plus".to_string(),
             remove: "circle-x".to_string(),
+            refresh: "refresh-cw".to_string(),
             theme: "palette".to_string(),
         }
     }

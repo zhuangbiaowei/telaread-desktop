@@ -28,6 +28,8 @@ struct FakeData {
     articles: HashMap<i64, Vec<ArticleItem>>,
     /// 指定所有文章共用的正文 key；默认用 article id（多数测试只验证列表）。
     content_key: Option<String>,
+    /// 可变的正文 key：模拟同步后服务端重新抽取、文章行换了 `contentKey`。
+    dynamic_content_key: Option<Arc<Mutex<String>>>,
     /// 与 `FakeRecommender` 共享的推荐列表，模拟本地库的实时变化。
     recommendations: Option<Arc<Mutex<Vec<RecommendationItem>>>>,
     /// 与 `FakeBookmarks` 共享的收藏列表，模拟本地库的实时变化。
@@ -44,12 +46,13 @@ impl ShellData for FakeData {
     }
 
     fn chapter_request(&self, article_id: i64) -> Result<ChapterRequest, TelaError> {
-        Ok(ChapterRequest::new(
-            self.content_key
-                .clone()
-                .unwrap_or_else(|| article_id.to_string()),
-            "zh-Hans",
-        ))
+        let key = self
+            .dynamic_content_key
+            .as_ref()
+            .and_then(|key| key.lock().ok().map(|key| key.clone()))
+            .or_else(|| self.content_key.clone())
+            .unwrap_or_else(|| article_id.to_string());
+        Ok(ChapterRequest::new(key, "zh-Hans"))
     }
 
     fn recommendations(&self) -> Result<Vec<RecommendationItem>, TelaError> {
@@ -665,6 +668,7 @@ fn recommendations_pane_lists_opens_and_cancels(cx: &mut TestAppContext) {
             vec![article(42, 1, "Hello Tela"), article(43, 1, "长章节")],
         )]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        dynamic_content_key: None,
         recommendations: Some(Arc::clone(&items)),
         bookmarks: None,
     });
@@ -744,6 +748,7 @@ fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) 
         feeds: vec![feed(1, "Tela 示例博客", 1, 1)],
         articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
         content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        dynamic_content_key: None,
         recommendations: Some(Arc::clone(&items)),
         bookmarks: None,
     });
@@ -815,6 +820,10 @@ fn reader_recommend_dialog_recommends_and_unrecommends(cx: &mut TestAppContext) 
 struct FakeBookmarks {
     items: Arc<Mutex<Vec<BookmarkItem>>>,
     calls: Arc<Mutex<Vec<String>>>,
+    /// 刷新过的收藏 id（自动检查与手动 Shift+R 都会记一笔）。
+    refreshes: Arc<Mutex<Vec<i64>>>,
+    /// 设置后模拟“网页标题变了”：刷新时把标题换成它，并报告 `changed = true`。
+    refreshed_title: Option<String>,
 }
 
 impl BookmarkService for FakeBookmarks {
@@ -840,6 +849,34 @@ impl BookmarkService for FakeBookmarks {
             items.retain(|item| item.id != bookmark_id);
         }
         Ok(())
+    }
+
+    fn refresh_bookmark(
+        &self,
+        bookmark_id: i64,
+    ) -> Result<tela_ui::shell::BookmarkRefresh, TelaError> {
+        if let Ok(mut refreshes) = self.refreshes.lock() {
+            refreshes.push(bookmark_id);
+        }
+        let mut items = self.items.lock().unwrap();
+        if let Some(title) = &self.refreshed_title
+            && let Some(item) = items.iter_mut().find(|item| item.id == bookmark_id)
+        {
+            item.title = title.clone();
+        }
+        let item = items
+            .iter()
+            .find(|item| item.id == bookmark_id)
+            .cloned()
+            .ok_or_else(|| TelaError::Content {
+                article: bookmark_id,
+                content_key: String::new(),
+                detail: "这条收藏不存在".to_string(),
+            })?;
+        Ok(tela_ui::shell::BookmarkRefresh {
+            item,
+            changed: self.refreshed_title.is_some(),
+        })
     }
 }
 
@@ -869,9 +906,12 @@ fn shift_b_opens_dialog_and_saves_a_bookmark(cx: &mut TestAppContext) {
         ..FakeData::default()
     });
     let data_for_view: Arc<dyn ShellData> = data;
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
     let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
         items: Arc::clone(&items),
         calls: Arc::clone(&calls),
+        refreshes: Arc::clone(&refreshes),
+        refreshed_title: None,
     });
     let (window, view) = open_window(cx, move |_, cx| {
         cx.new(|cx| {
@@ -998,9 +1038,12 @@ fn bookmarks_pane_lists_and_removes(cx: &mut TestAppContext) {
         ..FakeData::default()
     });
     let data_for_view: Arc<dyn ShellData> = data;
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
     let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
         items: Arc::clone(&items),
         calls: Arc::clone(&calls),
+        refreshes: Arc::clone(&refreshes),
+        refreshed_title: None,
     });
     let (window, view) = open_window(cx, move |_, cx| {
         cx.new(|cx| {
@@ -1045,4 +1088,205 @@ fn bookmarks_pane_lists_and_removes(cx: &mut TestAppContext) {
     })
     .unwrap();
     assert!(items.lock().unwrap().iter().all(|item| item.id != 7));
+}
+
+/// 打开收藏时后台检查网页更新；`Shift+R` 还能立刻再检查一次。
+///
+/// 正文来自网页，网页更新后本地缓存也应该跟上：选中时先显示本地 Markdown，
+/// 同时在后台重新抓一次；手动刷新不受 60 秒检查间隔限制。
+#[gpui::test]
+fn opening_a_bookmark_revalidates_it_and_shift_r_forces_a_refresh(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(vec![bookmark(9, "收藏九", 3_000)]));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 0, 0)],
+        articles: HashMap::from([(1, Vec::new())]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        bookmarks: Some(Arc::clone(&items)),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+        refreshes: Arc::clone(&refreshes),
+        refreshed_title: None,
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_bookmarks(
+                data_for_view,
+                content(),
+                None,
+                None,
+                None,
+                Some(service),
+                cx,
+            )
+        })
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        view.update(cx, |view, cx| {
+            assert!(view.show_bookmarks(cx));
+            assert!(view.select_bookmark(9, cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // 自动检查是后台任务：轮询到 FakeBookmarks 记录为止。
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if !refreshes.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        refreshes.lock().unwrap().as_slice(),
+        &[9],
+        "选中收藏时应自动检查网页更新"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 0, "检查更新不是重新收藏");
+
+    // Shift+R：即使刚检查过，也要立刻再抓一次。
+    cx.simulate_keystrokes(window, "shift-r");
+    for _ in 0..100 {
+        cx.run_until_parked();
+        if refreshes.lock().unwrap().len() > 1 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        refreshes.lock().unwrap().as_slice(),
+        &[9, 9],
+        "Shift+R 应立即刷新当前收藏"
+    );
+}
+
+/// 网页标题/正文变了：自动检查把新的一版写回列表，并刷新正在读的正文。
+#[gpui::test]
+fn bookmark_update_from_the_web_refreshes_the_list_and_reader(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let items = Arc::new(Mutex::new(vec![bookmark(11, "旧标题", 4_000)]));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let refreshes = Arc::new(Mutex::new(Vec::new()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 0, 0)],
+        articles: HashMap::from([(1, Vec::new())]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        bookmarks: Some(Arc::clone(&items)),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let service: Arc<dyn BookmarkService> = Arc::new(FakeBookmarks {
+        items: Arc::clone(&items),
+        calls: Arc::clone(&calls),
+        refreshes: Arc::clone(&refreshes),
+        refreshed_title: Some("网页上更新后的标题".to_string()),
+    });
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| {
+            ShellView::new_with_bookmarks(
+                data_for_view,
+                content(),
+                None,
+                None,
+                None,
+                Some(service),
+                cx,
+            )
+        })
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+        view.update(cx, |view, cx| {
+            assert!(view.show_bookmarks(cx));
+            assert!(view.select_bookmark(11, cx));
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    for _ in 0..100 {
+        cx.run_until_parked();
+        let updated = cx.update(|cx| view.read(cx).model().bookmarks[0].title.clone())
+            == "网页上更新后的标题";
+        if updated {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let title = cx.update(|cx| view.read(cx).model().bookmarks[0].title.clone());
+    assert_eq!(title, "网页上更新后的标题", "网页更新应写回收藏列表");
+    let notice = cx
+        .update(|cx| view.read(cx).bookmark_notice().map(str::to_string))
+        .unwrap_or_default();
+    assert!(
+        notice.contains("本地缓存已刷新"),
+        "应提示本地缓存已更新：{notice}"
+    );
+    let reader = cx.update(|cx| view.read(cx).reader());
+    assert_eq!(
+        cx.update(|cx| reader.read(cx).bookmark_id()),
+        Some(11),
+        "刷新后仍应停留在正在读的这篇收藏上"
+    );
+}
+
+/// 同步只换了正文 key、列表行看不出变化时，正在读的文章也要换成新正文。
+///
+/// 网页端更新文章后 Tela 会重新抽取正文：标题/摘要/已读状态可能都没变，
+/// `model.reload` 会返回 `false`，但 `contentKey` 变了就必须重新取正文。
+#[gpui::test]
+fn sync_that_only_changes_the_content_key_reloads_the_open_article(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let dynamic_key = Arc::new(Mutex::new(MOCK_CONTENT_KEY.to_string()));
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "A", 0, 0)],
+        articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
+        dynamic_content_key: Some(Arc::clone(&dynamic_key)),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| ShellView::new(data_for_view, content(), cx))
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+
+    let reader = cx.update(|cx| view.read(cx).reader());
+    assert_eq!(
+        cx.update(|cx| reader.read(cx).session().total_paragraphs()),
+        5,
+        "启动时应先读旧正文"
+    );
+
+    // 服务端重新抽取：文章行的 contentKey 变了，列表里的标题/摘要/已读都没变。
+    *dynamic_key.lock().unwrap() = MOCK_LONG_CONTENT_KEY.to_string();
+    let changed = cx.update(|cx| view.update(cx, |view, cx| view.reload(cx)));
+    assert!(!changed, "列表行没有可见变化：模型不应报告 changed");
+    cx.run_until_parked();
+
+    assert_eq!(
+        cx.update(|cx| reader.read(cx).session().total_paragraphs()),
+        120,
+        "contentKey 变了必须换上新的正文，哪怕列表模型没变"
+    );
 }

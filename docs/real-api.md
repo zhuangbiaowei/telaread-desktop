@@ -178,6 +178,9 @@ schema v6：
 抽正文，再清洗成块并用 `htmd` 转 Markdown；Markdown 以 `web-` 前缀写 `documents`，
 图片写 `cached_images`，收藏行写 `bookmarks`。阅读时用 `pulldown-cmark` 把 Markdown
 渲染回块 HTML，图片从本地缓存取；退出登录/切换账号不会清空它们，也不发翻译请求。
+收藏的 `documents` 不是不可变缓存：打开收藏时先显示本地 Markdown，再在后台重新抓取网页
+（60 秒内不重复），有变化才覆盖 `documents` 并刷新阅读面板；离线/抓取失败保留旧正文。
+`Shift+R` 与收藏行的「刷新」按钮可立即检查（`BookmarkService::refresh_bookmark`）。
 
 阅读与离线：`tela-app::content_cache::CachingContentApi` 第一次打开时从远端取回正文、译文
 与图片并写入上面三张缓存表；之后打开只读本地。左侧博客名旁的「缓存」按钮按订阅批量预取

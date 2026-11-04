@@ -38,8 +38,8 @@ use tela_store::{BookmarkInput, BookmarkRow, Store};
 use tela_sync::{PullError, PullOptions, SyncEngine, SyncReport, SyncStatus};
 use tela_ui::account::{AccountMode, AccountService, AccountStatus, LoginTicket};
 use tela_ui::shell::{
-    ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheService, RecommendationItem,
-    RecommendationService, ShellData,
+    ArticleItem, BookmarkItem, BookmarkRefresh, BookmarkService, FeedItem, OfflineCacheService,
+    RecommendationItem, RecommendationService, ShellData,
 };
 
 use crate::content_cache::CachingContentApi;
@@ -749,11 +749,7 @@ impl AppServices {
         let url = tela_content::webpage::normalize_url(url)?;
         let page = tela_content::webpage::fetch(&url)?;
         if page.is_empty() {
-            return Err(TelaError::Config {
-                detail: "这个页面里没有抽取到可读正文（可能是视频/交互页或需要登录）；\
-                         换一个网址试试"
-                    .to_string(),
-            });
+            return Err(empty_page_error());
         }
         self.save_bookmark_page(&page)
     }
@@ -767,31 +763,116 @@ impl AppServices {
         page: &tela_content::webpage::WebPage,
     ) -> Result<BookmarkItem, TelaError> {
         let content_key = tela_content::webpage::content_key_for_url(&page.url);
+        self.store_bookmark_page(page, &page.url, &content_key)
+    }
 
+    /// 重新抓取一条收藏的网页；网页更新时覆盖本地的 Markdown 正文与元数据。
+    ///
+    /// 阻塞（网络 + 磁盘），GUI 放到后台执行器。离线/抓取失败返回错误并
+    /// **保留本地旧正文**——缓存过的那一版仍然可以离线阅读。
+    pub fn refresh_bookmark(&self, bookmark_id: i64) -> Result<BookmarkRefresh, TelaError> {
+        let url = {
+            let store = self.lock_store()?;
+            let row = store
+                .get_bookmark(bookmark_id)?
+                .ok_or_else(|| bookmark_missing(bookmark_id))?;
+            row.url
+        };
+        let page = tela_content::webpage::fetch(&url)?;
+        self.refresh_bookmark_page(bookmark_id, &page)
+    }
+
+    /// 用已经抓取/解析好的网页刷新一条收藏（`refresh_bookmark` 与测试共用）。
+    ///
+    /// 与 `save_bookmark_page` 的区别：正文 key 与收藏 URL 沿用本地已有的值，
+    /// 所以网页重定向改了地址时也不会多出一条收藏；正文与元数据都没变时
+    /// 直接返回 `changed: false`，不下载图片、不重写缓存。
+    pub fn refresh_bookmark_page(
+        &self,
+        bookmark_id: i64,
+        page: &tela_content::webpage::WebPage,
+    ) -> Result<BookmarkRefresh, TelaError> {
+        if page.is_empty() {
+            return Err(empty_page_error());
+        }
+        let (row, changed) = {
+            let store = self.lock_store()?;
+            let row = store
+                .get_bookmark(bookmark_id)?
+                .ok_or_else(|| bookmark_missing(bookmark_id))?;
+            let cached = store.get_document(&row.content_key)?;
+            let changed = cached
+                .as_ref()
+                .map(|document| document.markdown != page.markdown)
+                .unwrap_or(true)
+                || row.title != page.title
+                || row.site != page.site
+                || row.lang != page.lang
+                || row.excerpt != page.excerpt;
+            (row, changed)
+        };
+        if !changed {
+            return Ok(BookmarkRefresh {
+                item: bookmark_item(row),
+                changed: false,
+            });
+        }
+        let item = self.store_bookmark_page(page, &row.url, &row.content_key)?;
+        Ok(BookmarkRefresh {
+            item,
+            changed: true,
+        })
+    }
+
+    /// 写正文/图片/收藏行；`url` 与 `content_key` 由调用方决定（新收藏或刷新）。
+    fn store_bookmark_page(
+        &self,
+        page: &tela_content::webpage::WebPage,
+        url: &str,
+        content_key: &str,
+    ) -> Result<BookmarkItem, TelaError> {
+        let sources: Vec<String> = page
+            .images
+            .iter()
+            .take(tela_content::webpage::MAX_IMAGES)
+            .cloned()
+            .collect();
+        // 已经缓存过的图片不再重复下载；只记下还缺哪些。
+        let missing: Vec<String> = {
+            let store = self.lock_store()?;
+            let mut missing = Vec::new();
+            for src in &sources {
+                if store.get_image(src)?.is_none() {
+                    missing.push(src.clone());
+                }
+            }
+            missing
+        };
         // 图片先下载（不持库锁），再一次性写库：下载期间不阻塞界面上的其它读库操作。
         let mut images: Vec<(String, Vec<u8>)> = Vec::new();
-        for src in page.images.iter().take(tela_content::webpage::MAX_IMAGES) {
+        for src in &missing {
             match tela_content::webpage::fetch_bytes(src) {
                 Ok(bytes) => images.push((src.clone(), bytes)),
                 Err(_) => continue,
             }
         }
+        let image_count = sources.len() - missing.len() + images.len();
 
         let mut store = self.lock_store()?;
-        store.put_document(&content_key, &page.markdown, &page.lang)?;
+        store.put_document(content_key, &page.markdown, &page.lang)?;
         // 旧版本把正文块存在 bodies；重新收藏时清掉，避免两份正文不一致。
-        store.delete_body(&content_key)?;
+        store.delete_body(content_key)?;
         for (src, bytes) in &images {
             store.put_image(src, bytes)?;
         }
         let id = store.put_bookmark(&BookmarkInput {
-            url: page.url.clone(),
+            url: url.to_string(),
             title: page.title.clone(),
             site: page.site.clone(),
             lang: page.lang.clone(),
             excerpt: page.excerpt.clone(),
-            content_key: content_key.clone(),
-            image_count: images.len() as i64,
+            content_key: content_key.to_string(),
+            image_count: image_count as i64,
             created_at: now_ms(),
         })?;
         let row = store.get_bookmark(id)?.ok_or_else(|| TelaError::Store {
@@ -816,11 +897,7 @@ impl AppServices {
         let store = self.lock_store()?;
         let row = store
             .get_bookmark(bookmark_id)?
-            .ok_or_else(|| TelaError::Content {
-                article: bookmark_id,
-                content_key: String::new(),
-                detail: "这条收藏不存在（可能已被移除）".to_string(),
-            })?;
+            .ok_or_else(|| bookmark_missing(bookmark_id))?;
         Ok(ChapterRequest::new(row.content_key, self.lang.clone()))
     }
 
@@ -1217,6 +1294,28 @@ impl BookmarkService for AppServices {
 
     fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError> {
         AppServices::remove_bookmark(self, bookmark_id)
+    }
+
+    fn refresh_bookmark(&self, bookmark_id: i64) -> Result<BookmarkRefresh, TelaError> {
+        AppServices::refresh_bookmark(self, bookmark_id)
+    }
+}
+
+/// 收藏行不存在时的错误（刷新/取正文都可能遇到）。
+fn bookmark_missing(bookmark_id: i64) -> TelaError {
+    TelaError::Content {
+        article: bookmark_id,
+        content_key: String::new(),
+        detail: "这条收藏不存在（可能已被移除）".to_string(),
+    }
+}
+
+/// 网页抽不到正文时统一的提示（新收藏与刷新共用）。
+fn empty_page_error() -> TelaError {
+    TelaError::Config {
+        detail: "这个页面里没有抽取到可读正文（可能是视频/交互页或需要登录）；\
+                 换一个网址试试"
+            .to_string(),
     }
 }
 

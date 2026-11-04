@@ -225,16 +225,32 @@ pub trait RecommendationService: Send + Sync {
     fn unrecommend(&self, article_id: i64) -> Result<(), TelaError>;
 }
 
-/// 收藏写能力：供 `Shift+B` 弹窗与「我的收藏」列表的删除按钮调用。
+/// 一次收藏网页刷新的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookmarkRefresh {
+    /// 刷新后的收藏项；网页标题/站点/摘要/图片数可能已经变化。
+    pub item: BookmarkItem,
+    /// 网页正文或元数据是否有变化；`false` 时本地缓存原样保留。
+    pub changed: bool,
+}
+
+/// 收藏写能力：供 `Shift+B` 弹窗、「我的收藏」列表的删除/刷新按钮，
+/// 以及打开收藏时的后台更新检查调用。
 ///
-/// `add_bookmark` 会真的联网下载页面与图片（阻塞；调用方放到后台线程），
-/// 成功后把标题、正文块与图片全部写进本地库，并返回可直接展示的一条收藏。
+/// `add_bookmark` / `refresh_bookmark` 会真的联网下载页面与图片（阻塞；
+/// 调用方放到后台线程），成功后把标题、正文与图片写进本地库。
 pub trait BookmarkService: Send + Sync {
     /// 收藏一个网址：抓取页面、抽取正文、下载图片并落库。
     fn add_bookmark(&self, url: &str) -> Result<BookmarkItem, TelaError>;
 
     /// 删除一条收藏（连同它引用的本地正文）；不存在时也视为成功。
     fn remove_bookmark(&self, bookmark_id: i64) -> Result<(), TelaError>;
+
+    /// 重新抓取一条收藏的网页，网页更新时覆盖本地的 Markdown 正文与元数据。
+    ///
+    /// 抓取失败（离线、页面失效）时返回错误并**保留**本地旧正文，
+    /// 用户仍然可以离线阅读缓存下来的那一版。
+    fn refresh_bookmark(&self, bookmark_id: i64) -> Result<BookmarkRefresh, TelaError>;
 }
 
 /// 订阅级离线缓存进度（左侧博客名旁的按钮显示它）。

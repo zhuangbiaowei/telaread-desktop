@@ -86,6 +86,7 @@
 | `Shift+B` 收藏弹窗 | ✅ | 单行网址输入、剪贴板预填、Esc/Enter、后台下载与失败重试 |
 | 正文/标题/图片落库 | ✅ | `dom_smoothie`（Readability）抽正文 → 本地清洗 → `htmd` 转 Markdown；`documents`（`web-` key）+ `cached_images` + `bookmarks`（schema v6） |
 | 「我的收藏」列表与阅读 | ✅ | 侧栏入口、标题/站点/日期/图片数、移除、收藏正文阅读 |
+| 网页更新同步到缓存 | ✅ | 打开收藏时先读本地 Markdown，后台重新抓网页（60s 内不重复）；正文/标题变了就覆盖 `documents` 与阅读面板，离线/失败保留旧正文；也可 `Shift+R` 或行内「刷新」 |
 | 抽取质量 | 🟡 | 启发式容器/标题；不执行脚本、不解析 `srcset`/`<picture>`；需登录/人工验证页会明确报错（`TelaError::Blocked`），不保存空文章 |
 | 站点适配 | ✅ | 微信文章用微信内 UA + `#js_content`；X 帖子按 SSR 数据取长文全文与引用帖、标题取正文第一行；懒加载图片认 `data-src` 等；跳过 `display:none`；部分站点提前断 TLS 时保留已读内容 |
 | Markdown 浏览 | ✅ | 阅读时用 `pulldown-cmark` 把 Markdown 渲染回块 HTML，图片走本地缓存 |
@@ -123,7 +124,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| 阅读快捷键 | ✅ | `o/c/t`、`PgUp/PgDn`、`↑/↓`、`r`、`j/k`、`Shift+J/K`、`Shift+B`（收藏网页） |
+| 阅读快捷键 | ✅ | `o/c/t`、`PgUp/PgDn`、`↑/↓`、`r`（读缓存）、`Shift+R`（从来源刷新）、`j/k`、`Shift+J/K`、`Shift+B`（收藏网页） |
 | 全局快捷键 / 命令面板 | ⬜ | — |
 | 深浅色 | ⬜ | — |
 | 窗口尺寸/位置记忆 | ⬜ | 固定初始窗口 |

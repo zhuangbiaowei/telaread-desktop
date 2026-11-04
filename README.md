@@ -4,7 +4,9 @@
 
 基于 [Tela](https://telaread.com) 的桌面阅读器（Rust + [GPUI Kit](https://github.com/longbridge/gpui-kit)）。
 
-> **当前进度（v0.4.5）**：**主题化界面 + 真实 API v1 底座** —— 三套内置主题
+> **当前进度（v0.4.6）**：**网页更新跟随 + 主题化界面 + 真实 API v1 底座** —— 网页端改了文章，
+> 同步后正在读的正文会自动换成新的 `contentKey`；收藏的网页在打开时后台检查更新
+> （也可以 `Shift+R` 立即刷新）。界面支持三套内置主题
 > （Catppuccin Mocha / Latte、Paper 纸页）与本机 TOML 主题（图标、字体、颜色、边框都可配），
 > 选择立即生效、下次开窗仍是它；底座是已接通的真实 API v1 —— OAuth 2.1 + PKCE 登录、
 > 刷新令牌进系统凭据库、全量/增量同步、离线变更队列、正文/译文/图片本地优先阅读、
@@ -122,7 +124,7 @@ HTTPS_PROXY=http://127.0.0.1:7888 tela-desktop
 ```bash
 cargo build --workspace --locked                          # 构建
 cargo test --workspace --locked                           # 全部测试（含真实 API fixture 契约）
-cargo run -p tela-app -- --version                        # tela-app 0.4.5
+cargo run -p tela-app -- --version                        # tela-app 0.4.6
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -183,6 +185,9 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
   `PgUp` / `↑` 反向滚动，不会在页边界跳转或重置位置。
 - 没有译文时会自动向服务端请求并轮询；有译文后写回本地缓存，后续打开不再请求。
   今日额度用完或作者关闭翻译时，会在标题下方给出对应提示并继续显示原文。
+- 正文按 `contentKey` 缓存：网页端更新文章、Tela 重新抽取后 `contentKey` 会变，
+  下一次同步（启动、标记已读、`Shift+R` 等）完成后，正在读的这篇会自动换成新正文，
+  不需要重启或重新选中。
 - 切换视图会保持当前阅读位置；加载失败显示错误详情与「重试」按钮，快捷键 `r` 等效。
 
 ### 推荐
@@ -207,8 +212,12 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
   4. 正文 Markdown 写入 SQLite 的 `documents` 表，之后离线浏览：阅读面板用
      `pulldown-cmark` 把 Markdown 渲染回块 HTML，图片从本地缓存取。
 - 「我的收藏」按收藏时间倒序列出标题、站点、日期、图片数与网址（列表右上角也有「＋ 收藏」入口）；
-  点击在右侧阅读，行内「移除」删除收藏（连同它的 Markdown 正文）。
+  点击在右侧阅读，行内「刷新」重新抓取网页、行内「移除」删除收藏（连同它的 Markdown 正文）。
   重复收藏同一个网址只保留一条并刷新内容。
+- **网页更新会同步到本地缓存**：打开一条收藏时先立刻显示本地 Markdown，同时在后台重新抓取
+  网页（同一篇 60 秒内不重复检查）；正文或标题变了就覆盖 `documents` 里的旧版本并刷新阅读面板，
+  没变则保持原样。离线或抓取失败时保留旧正文，仍可离线阅读。
+  想立即检查时可以按 `Shift+R`（阅读面板任意位置）或点收藏行里的「刷新」。
 - 收藏是**本地资料**，不参与 `/v1/sync`，退出登录或切换账号不会清空；没有登录态也能用。
 - 弹窗里会显示下载进度文案与失败原因（地址不合法、页面不是 HTML、抓取超时等），
   失败时弹窗保留，改完地址可直接重试。正文抽取是启发式的：视频页、需要登录的页面
@@ -235,7 +244,7 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 - 侧栏底部有「主题 · 当前主题名」入口，点开是主题选择器：内置 **Catppuccin Mocha**
   （深色）、**Catppuccin Latte**（浅色）与 **Paper 纸页**（暖色 + 衬线正文 + 书页图标）。
 - 一个主题就是一组配置，分三类：**图标**（博客、收藏、文章、推荐、按钮、打开原文、
-  缓存、新增、移除、主题入口）、**字体与颜色**（界面/正文/标题/代码字体，字号、行高、
+  缓存、新增、移除、刷新、主题入口）、**字体与颜色**（界面/正文/标题/代码字体，字号、行高、
   段落间距，以及正文标题/链接/代码/引用/选区等颜色）、**边框修饰**（描边、分隔线、焦点）。
 - 选择立即生效并写入 `<数据目录>/ui.toml`，下次启动第一帧就是该主题，不会先闪一下默认配色；
   主题是本机设置，不参与账号同步。
@@ -275,9 +284,11 @@ scripts/tela-gui-real.sh --check    # 无窗口数据冒烟（读 tmp/tela.env +
 ### 快捷键与鼠标
 
 - 全局：`j` / `k` 下一篇 / 上一篇；`Shift+J` / `Shift+K` 下一个 / 上一个博客；
-  `Shift+B` 收藏一个网址（打开「收藏网页」弹窗）。
+  `Shift+B` 收藏一个网址（打开「收藏网页」弹窗）；`Shift+R` 刷新当前内容
+  （收藏重新抓取网页、文章重新同步，网页更新后本地缓存也会跟着更新）。
 - 阅读：`o` 原文、`c` 对照、`t` 译文、`↑` / `↓` 逐行滚动、
-  `PgUp` / `PgDn` 按视口滚动（一篇到底、不切页）、`r` 重试。
+  `PgUp` / `PgDn` 按视口滚动（一篇到底、不切页）、`r` 重试（读本地缓存）、
+  `Shift+R` 从来源刷新。
 - 鼠标：点击订阅/文章切换，滚轮滚动，正文文字可选中；侧栏底部「主题」打开主题选择器。
 
 ### 演示模式
@@ -419,8 +430,8 @@ SQLite 采用 schema v6（旧库打开时只补表，不丢已有数据）：
 ```bash
 # tag 去掉 v 前缀后必须等于 Cargo.toml 里 tela-app 的版本
 # 仓库变量 TELA_CLIENT_ID 必须在构建前配好（发布包内置它）
-git tag -a v0.4.5 -m "Tela Desktop v0.4.5"
-git push origin v0.4.5
+git tag -a v0.4.6 -m "Tela Desktop v0.4.6"
+git push origin v0.4.6
 ```
 
 推送 tag 后：
@@ -439,8 +450,8 @@ git push origin v0.4.5
 预发布用带连字符的 tag，会自动标记为 prerelease：
 
 ```bash
-git tag -a v0.4.5-rc.1 -m "Tela Desktop v0.4.5-rc.1"
-git push origin v0.4.5-rc.1
+git tag -a v0.4.6-rc.1 -m "Tela Desktop v0.4.6-rc.1"
+git push origin v0.4.6-rc.1
 ```
 
 ### Linux 包：tar.gz 与 AppImage
@@ -451,12 +462,12 @@ git push origin v0.4.5-rc.1
 ```bash
 # tar.gz：解压后直接跑
 mkdir -p ~/.local/tela
-tar -xzf tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
+tar -xzf tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
 ~/.local/tela/tela-gui
 
 # AppImage：单文件，chmod 之后就能运行
-chmod +x tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
-./tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
+chmod +x tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.AppImage
+./tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.AppImage
 ```
 
 - AppImage 需要 FUSE2 才能挂载：Arch `sudo pacman -S fuse2`、Debian/Ubuntu

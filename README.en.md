@@ -4,7 +4,10 @@ A desktop reader for [Tela](https://telaread.com) (Rust + [GPUI Kit](https://git
 
 English | [简体中文](./README.md)
 
-> **Current status (v0.4.5)**: **Themed UI on top of the real API v1 foundation** — three built-in themes
+> **Current status (v0.4.6)**: **Web updates followed, themed UI, on top of the real API v1 foundation** —
+> when a post changes on the web, the article that is open switches to the new `contentKey` after
+> sync, and bookmarked pages re-check for updates when opened (or immediately with `Shift+R`).
+> The interface has three built-in themes
 > (Catppuccin Mocha / Latte, Paper) plus local TOML themes (icons, fonts, colors and borders all
 > configurable), applied immediately and restored on next launch; underneath is the wired-up real
 > API v1: OAuth 2.1 + PKCE login, refresh tokens stored in the OS credential store, full/incremental
@@ -111,7 +114,7 @@ declares `rust-version = "1.92"`). `reqwest` uses rustls (aws-lc-rs), so the fir
 ```bash
 cargo build --workspace --locked                          # build
 cargo test --workspace --locked                           # all tests (including real API fixture contracts)
-cargo run -p tela-app -- --version                        # tela-app 0.4.5
+cargo run -p tela-app -- --version                        # tela-app 0.4.6
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -169,6 +172,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 - The body renders block-level HTML (headings, quotes, lists, tables, links, code blocks, images); text is selectable.
 - The whole article is rendered at once and scrolls continuously: hold `PgDn` or `↓` to read all the way to the end, which is marked with "— End of article —"; `PgUp` / `↑` scroll back up without jumping at page boundaries or resetting the position.
 - Without a translation it automatically requests one from the server and polls; once available it is written back to the local cache and later opens no longer request it. When today's quota is exhausted or the author has disabled translation, a notice appears below the title and the original text keeps showing.
+- Article bodies are cached by `contentKey`: when a post is updated on the web and Tela re-extracts it, the `contentKey` changes, and after the next sync (startup, marking read, `Shift+R`, …) the article that is open switches to the new body automatically — no restart or re-selection needed.
 - Switching views keeps the current reading position; load failures show error details and a "Retry" button, and the `r` shortcut does the same.
 
 ### Recommendations
@@ -187,7 +191,8 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
   2. the body is cleaned locally (hidden nodes, lazy images, whitelisted tags, absolute URLs) and converted to Markdown with `htmd` (a turndown.js port);
   3. body images are downloaded into `cached_images` under their original absolute URLs, and the Markdown keeps those links;
   4. the Markdown body is written to the local `documents` table. Offline browsing renders it back into block HTML with `pulldown-cmark` and reads images from the local cache.
-- "My Bookmarks" lists entries newest first with title, site, date, image count and URL (the list header also has a "＋ 收藏" / "+ Bookmark" entry); clicking one opens it in the reading panel, and "Remove" on the row deletes it (together with its Markdown body). Bookmarking the same URL twice keeps a single entry and refreshes its content.
+- "My Bookmarks" lists entries newest first with title, site, date, image count and URL (the list header also has a "＋ 收藏" / "+ Bookmark" entry); clicking one opens it in the reading panel, "Refresh" on the row re-fetches the page, and "Remove" deletes it (together with its Markdown body). Bookmarking the same URL twice keeps a single entry and refreshes its content.
+- **Web updates reach the local cache**: opening a bookmark shows the local Markdown immediately and re-fetches the page in the background (at most once every 60 seconds per bookmark); if the body or title changed, the old copy in `documents` is replaced and the reading panel refreshes, otherwise nothing changes. When offline or when the fetch fails the old body is kept, so offline reading still works. Press `Shift+R` (anywhere in the reading panel) or click "Refresh" on the bookmark row to check right away.
 - Bookmarks are **local data**: they are not part of `/v1/sync`, survive sign-out and account switches, and work without being signed in.
 - The modal shows download progress and the failure reason (invalid URL, non-HTML response, timeout, …); on failure it stays open so the URL can be fixed and retried. Body extraction is heuristic: video pages and login-gated pages may yield nothing, in which case the modal reports that no readable body was found.
 - **Per-site fetching**: `mp.weixin.qq.com` redirects desktop user agents to a "环境异常 / complete the verification" page, so WeChat articles are fetched with the in-app WeChat browser user agent and only the `#js_content` body container is used. If a site still returns a verification page or login wall, the modal reports "this page requires human verification" instead of **saving the verification page as an article**.
@@ -198,7 +203,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 ### Themes
 
 - The bottom of the sidebar has a "Theme · current name" entry that opens the theme picker: built-in **Catppuccin Mocha** (dark), **Catppuccin Latte** (light) and **Paper** (warm paper, serif body text and book icons).
-- A theme is one set of three kinds of configuration: **icons** (feed, bookmark, article, recommendation, buttons, open-original, cache, add, remove, theme entry), **fonts and colors** (UI/body/heading/mono fonts, body size, line height, paragraph gap, and heading/link/code/quote/selection colors), and **border decorations** (borders, dividers, focus).
+- A theme is one set of three kinds of configuration: **icons** (feed, bookmark, article, recommendation, buttons, open-original, cache, add, remove, refresh, theme entry), **fonts and colors** (UI/body/heading/mono fonts, body size, line height, paragraph gap, and heading/link/code/quote/selection colors), and **border decorations** (borders, dividers, focus).
 - Selecting a theme applies immediately and writes `<data dir>/ui.toml`; the next launch starts with that theme on the first frame (no flash of the default palette). Themes are local settings and are never synced to the account.
 - To create one, drop a TOML file at `<data dir>/themes/<id>.toml`; the file name is the theme id, and the same id overrides the built-in theme. "Rescan" in the picker reloads files without a restart; a broken file is reported at the bottom of the picker and never prevents startup.
 - The full format (icon names, fonts, colors, border fields and ranges) is in [docs/themes.md](./docs/themes.md) (Chinese).
@@ -224,8 +229,8 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 
 ### Keyboard shortcuts and mouse
 
-- Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog; `Shift+B` bookmark a URL (opens the "Bookmark web page" modal).
-- Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry.
+- Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog; `Shift+B` bookmark a URL (opens the "Bookmark web page" modal); `Shift+R` refresh the current content (re-fetch a bookmark, re-sync an article; a web update then reaches the local cache).
+- Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry (read the local cache), `Shift+R` refresh from the source.
 - Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable; the "Theme" entry at the bottom of the sidebar opens the theme picker.
 
 ### Demo mode
@@ -353,8 +358,8 @@ Releases are automated by [`release.yml`](./.github/workflows/release.yml):
 ```bash
 # after removing the v prefix, the tag must equal tela-app's version in Cargo.toml
 # the TELA_CLIENT_ID repository variable must be configured before building (release packages embed it)
-git tag -a v0.4.5 -m "Tela Desktop v0.4.5"
-git push origin v0.4.5
+git tag -a v0.4.6 -m "Tela Desktop v0.4.6"
+git push origin v0.4.6
 ```
 
 After pushing the tag:
@@ -372,8 +377,8 @@ After pushing the tag:
 Pre-releases use a hyphenated tag and are automatically marked as prerelease:
 
 ```bash
-git tag -a v0.4.5-rc.1 -m "Tela Desktop v0.4.5-rc.1"
-git push origin v0.4.5-rc.1
+git tag -a v0.4.6-rc.1 -m "Tela Desktop v0.4.6-rc.1"
+git push origin v0.4.6-rc.1
 ```
 
 ### Linux packages: tar.gz and AppImage
@@ -384,12 +389,12 @@ Both ship the same binaries (`tela-gui` + `tela-app`) and need the same system l
 ```bash
 # tar.gz: unpack and run
 mkdir -p ~/.local/tela
-tar -xzf tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
+tar -xzf tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/tela
 ~/.local/tela/tela-gui
 
 # AppImage: a single file, just make it executable
-chmod +x tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
-./tela-desktop-v0.4.5-x86_64-unknown-linux-gnu.AppImage
+chmod +x tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.AppImage
+./tela-desktop-v0.4.6-x86_64-unknown-linux-gnu.AppImage
 ```
 
 - AppImages need FUSE2 to mount: `sudo pacman -S fuse2` on Arch,

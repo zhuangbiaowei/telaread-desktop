@@ -64,6 +64,7 @@ external = "external-link"   # 打开原文
 cache = "download"           # 离线缓存
 add = "plus"                 # 新增
 remove = "circle-x"          # 移除/取消
+refresh = "refresh-cw"       # 刷新/检查网页更新
 theme = "palette"            # 主题入口
 
 [typography]

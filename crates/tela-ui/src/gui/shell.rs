@@ -3,9 +3,9 @@
 //! 只做“把 [`ShellViewModel`] 画成元素 + 把点击转成模型操作”，
 //! 不查库、不发 HTTP、不解析正文。阅读面板在 S3 由 [`crate::gui::reader`] 接管。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tela_content::api::ContentApi;
 use tela_proto::TelaError;
@@ -28,6 +28,12 @@ use gpui_kit::*;
 /// 左上角品牌文字点击后打开的 TelaRead 主页。
 pub const HOME_URL: &str = "https://telaread.com";
 
+/// 打开收藏时后台检查网页更新的最小间隔。
+///
+/// 本地正文先显示、不阻塞阅读；只有距上次检查超过这个间隔才重新抓网页，
+/// 避免在收藏列表里来回切换时反复请求同一篇。
+const BOOKMARK_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// 三栏外壳视图：左订阅、中文章、右阅读面板。
 pub struct ShellView {
     data: Arc<dyn ShellData>,
@@ -45,6 +51,8 @@ pub struct ShellView {
     sync_in_flight: bool,
     sync_again: bool,
     sync_task: Option<Task<()>>,
+    /// 这次同步是用户按 `Shift+R` 触发的：完成后给一句「已同步」提示。
+    refresh_after_sync: bool,
     /// 订阅级离线缓存能力；测试/无账号装配可以为空（按钮仍显示，点击给出提示）。
     offline_cache: Option<Arc<dyn OfflineCacheService>>,
     /// 每个订阅最近一次缓存进度（左侧按钮显示它）。
@@ -61,10 +69,16 @@ pub struct ShellView {
     bookmarks: Option<Arc<dyn BookmarkService>>,
     /// 收藏网页弹窗；`None` 表示关闭。弹窗自己负责下载与错误提示。
     bookmark_dialog: Option<Entity<BookmarkDialogView>>,
-    /// 收藏成功/失败的一句提示（侧栏顶部与收藏列表）。
+    /// 收藏成功/失败/更新的一句提示（侧栏顶部与收藏列表）。
     bookmark_notice: Option<String>,
     /// 收藏弹窗的事件订阅；必须保活。
     bookmark_subscription: Option<Subscription>,
+    /// 每条收藏最近一次检查网页更新的时间（避免来回切换时反复抓同一页）。
+    bookmark_checks: HashMap<i64, Instant>,
+    /// 正在后台检查更新的收藏 id（同一篇不并发抓两次）。
+    bookmark_refreshing: HashSet<i64>,
+    /// 后台检查更新的任务句柄，必须保活。
+    bookmark_tasks: Vec<Task<()>>,
     /// 左侧订阅列表的滚动句柄：`Shift+J/K` 切换订阅时让列表跟着滚。
     feed_scroll: ScrollHandle,
     /// 中间文章列表的滚动句柄：`j/k` 切换文章时让列表跟着滚。
@@ -186,10 +200,16 @@ impl ShellView {
             .map(|accounts| accounts.status())
             .unwrap_or_default();
         let _reader_subscription =
-            cx.subscribe(&reader, |this, _reader, _event: &ReaderEvent, cx| {
-                // 阅读面板已经在本地写入了推荐行；外壳只负责刷新列表与补一次同步。
-                this.reload(cx);
-                this.schedule_sync(cx);
+            cx.subscribe(&reader, |this, _reader, event: &ReaderEvent, cx| {
+                match event {
+                    // 阅读面板已经在本地写入了推荐行；外壳只负责刷新列表与补一次同步。
+                    ReaderEvent::RecommendationChanged { .. } => {
+                        this.reload(cx);
+                        this.schedule_sync(cx);
+                    }
+                    // Shift+R：从来源（网页或同步）重新拉取当前内容。
+                    ReaderEvent::RefreshRequested => this.refresh_current(cx),
+                }
                 cx.notify();
             });
         let mut view = Self {
@@ -207,6 +227,7 @@ impl ShellView {
             sync_in_flight: false,
             sync_again: false,
             sync_task: None,
+            refresh_after_sync: false,
             offline_cache,
             cache_progress: HashMap::new(),
             cache_notice: None,
@@ -217,6 +238,9 @@ impl ShellView {
             bookmark_dialog: None,
             bookmark_notice: None,
             bookmark_subscription: None,
+            bookmark_checks: HashMap::new(),
+            bookmark_refreshing: HashSet::new(),
+            bookmark_tasks: Vec::new(),
             feed_scroll: ScrollHandle::new(),
             article_scroll: ScrollHandle::new(),
             recommendation_scroll: ScrollHandle::new(),
@@ -651,10 +675,17 @@ impl ShellView {
         self.bookmark_dialog = None;
         self.bookmark_subscription = None;
         self.model.reload(self.data.as_ref());
+        // 刚下载的就是最新版本，别再触发一次“检查网页更新”。
+        self.bookmark_checks.insert(item.id, Instant::now());
         self.bookmark_notice = Some(format!("已收藏「{}」到「我的收藏」", item.title));
         if self.model.section == ShellSection::Bookmarks {
             self.model.select_bookmark(item.id);
             self.sync_reader(cx);
+            // 再次收藏同一个网址会覆盖本地正文：正在看这篇时立即换成新正文，
+            // 不能因为“选中的还是同一篇”而继续显示旧内容。
+            if self.reader.read(cx).bookmark_id() == Some(item.id) {
+                self.reader.update(cx, |reader, cx| reader.reload(cx));
+            }
             self.scroll_to_selection();
         }
         cx.notify();
@@ -706,6 +737,113 @@ impl ShellView {
             }
         }
         cx.notify();
+    }
+
+    /// 刷新当前正在读的内容（`Shift+R`）。
+    ///
+    /// - 收藏的网页：重新抓取网页，网页更新时替换本地 Markdown 正文；
+    /// - 文章：先同步一轮（服务端重新抽取正文会下发新的 `contentKey`），
+    ///   同步完成后 [`Self::reload`] 会让阅读面板换上新的正文。
+    pub fn refresh_current(&mut self, cx: &mut Context<Self>) {
+        let (bookmark_id, article_id) = {
+            let reader = self.reader.read(cx);
+            (reader.bookmark_id(), reader.article_id())
+        };
+        if let Some(bookmark_id) = bookmark_id {
+            self.refresh_bookmark_content(bookmark_id, true, cx);
+            return;
+        }
+        if article_id.is_some() {
+            if self.accounts.is_none() {
+                self.account_notice = Some("当前装配不支持同步，无法刷新文章".to_string());
+            } else {
+                self.account_notice = Some("正在同步最新文章…".to_string());
+                self.refresh_after_sync = true;
+                self.schedule_sync(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// 用户主动刷新一条收藏（列表行的「刷新」按钮）。
+    pub fn refresh_bookmark(&mut self, bookmark_id: i64, cx: &mut Context<Self>) {
+        self.refresh_bookmark_content(bookmark_id, true, cx);
+    }
+
+    /// 打开收藏时在后台检查网页是否有更新。
+    ///
+    /// 本地 Markdown 已经先显示出来，这里只做「stale-while-revalidate」：
+    /// 网页有变化才刷新本地缓存与阅读面板，失败（离线/页面失效）时保留旧正文。
+    fn maybe_revalidate_bookmark(&mut self, bookmark_id: i64, cx: &mut Context<Self>) {
+        if self.bookmarks.is_none() || self.bookmark_refreshing.contains(&bookmark_id) {
+            return;
+        }
+        if self
+            .bookmark_checks
+            .get(&bookmark_id)
+            .is_some_and(|checked| checked.elapsed() < BOOKMARK_REVALIDATE_INTERVAL)
+        {
+            return;
+        }
+        self.refresh_bookmark_content(bookmark_id, false, cx);
+    }
+
+    /// 后台重新抓取一条收藏；`user_initiated` 决定失败/无更新时是否给提示。
+    fn refresh_bookmark_content(
+        &mut self,
+        bookmark_id: i64,
+        user_initiated: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(service) = self.bookmarks.clone() else {
+            if user_initiated {
+                self.bookmark_notice = Some("当前装配不支持刷新收藏".to_string());
+                cx.notify();
+            }
+            return;
+        };
+        if !self.bookmark_refreshing.insert(bookmark_id) {
+            return;
+        }
+        // 先记时间：即使网络很慢，也不会在下载期间被反复触发。
+        self.bookmark_checks.insert(bookmark_id, Instant::now());
+        if user_initiated {
+            self.bookmark_notice = Some("正在检查网页更新…".to_string());
+            cx.notify();
+        }
+        let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { service.refresh_bookmark(bookmark_id) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.bookmark_refreshing.remove(&bookmark_id);
+                match result {
+                    Ok(refresh) => {
+                        if refresh.changed {
+                            view.reload(cx);
+                            if view.reader.read(cx).bookmark_id() == Some(bookmark_id) {
+                                view.reader.update(cx, |reader, cx| reader.reload(cx));
+                            }
+                            view.bookmark_notice = Some(format!(
+                                "「{}」已在网页上更新，本地缓存已刷新",
+                                refresh.item.title
+                            ));
+                        } else if user_initiated {
+                            view.bookmark_notice = Some("网页没有新的变化".to_string());
+                        }
+                    }
+                    Err(error) => {
+                        // 后台检查失败不打扰阅读：旧正文仍然可读。
+                        if user_initiated {
+                            view.bookmark_notice = Some(format!("刷新失败：{error}"));
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        });
+        self.bookmark_tasks.push(task);
     }
 
     /// 选中文章；返回是否发生变化。
@@ -826,7 +964,8 @@ impl ShellView {
         }
     }
 
-    /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客，`Shift+b` 收藏网页。
+    /// 外壳级快捷键：`j/k` 文章，`Shift+j/k` 博客，`Shift+b` 收藏网页，
+    /// `Shift+r` 刷新当前内容（收藏重新抓取，文章重新同步）。
     ///
     /// 阅读面板自己处理 `o/c/t/PageUp/PageDown/↑/↓`；这里只接管需要改
     /// 选中项或开弹窗的键，事件从阅读面板冒泡上来后调用。
@@ -853,6 +992,10 @@ impl ShellView {
                 self.open_bookmark_dialog(window, cx);
                 true
             }
+            ("r", true) => {
+                self.refresh_current(cx);
+                true
+            }
             _ => false,
         }
     }
@@ -863,10 +1006,13 @@ impl ShellView {
         if changed {
             self.sync_reader(cx);
             // 同步/登录切换后，当前文章的“已推荐”标记也要跟着本地行更新。
-            self.reader.update(cx, |reader, cx| {
-                reader.refresh_recommendation(cx);
-            });
+            self.reader
+                .update(cx, |reader, cx| reader.refresh_recommendation(cx));
         }
+        // 服务端重新抽取过正文时只有 `contentKey` 变了，标题/摘要/已读状态可能都没变，
+        // `model.reload` 会返回 false；因此无论列表是否变化都要检查一次当前正文。
+        self.reader
+            .update(cx, |reader, cx| reader.reload_if_content_changed(cx));
         changed
     }
 
@@ -890,6 +1036,8 @@ impl ShellView {
                 self.reader.update(cx, |reader, cx| {
                     reader.select_bookmark(bookmark_id, title, url, cx)
                 });
+                // 本地 Markdown 立刻显示；在线时顺势检查网页有没有更新。
+                self.maybe_revalidate_bookmark(bookmark_id, cx);
             }
             return;
         }
@@ -937,6 +1085,8 @@ impl ShellView {
             return;
         }
         self.sync_in_flight = true;
+        let refresh_requested = self.refresh_after_sync;
+        self.refresh_after_sync = false;
         let generation = self.login_generation;
         let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = cx
@@ -948,8 +1098,15 @@ impl ShellView {
                     return;
                 }
                 view.sync_in_flight = false;
-                if let Err(error) = result {
-                    view.account_notice = Some(format!("本地变更已入队，但同步失败：{error}"));
+                match &result {
+                    Ok(()) => {
+                        if refresh_requested {
+                            view.account_notice = Some("已同步最新文章".to_string());
+                        }
+                    }
+                    Err(error) => {
+                        view.account_notice = Some(format!("本地变更已入队，但同步失败：{error}"));
+                    }
                 }
                 view.reload(cx);
                 if view.sync_again {
@@ -2225,7 +2382,13 @@ impl ShellView {
                                     .child(item.title.clone()),
                             ),
                     )
-                    .child(self.remove_bookmark_button(bookmark_id, theme, cx)),
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_1()
+                            .child(self.refresh_bookmark_button(bookmark_id, theme, cx))
+                            .child(self.remove_bookmark_button(bookmark_id, theme, cx)),
+                    ),
             )
             .child(
                 div()
@@ -2241,6 +2404,44 @@ impl ShellView {
                     .truncate()
                     .child(url),
             )
+    }
+
+    /// 收藏行右侧的「刷新」按钮：重新抓取网页，网页更新时替换本地缓存。
+    fn refresh_bookmark_button(
+        &self,
+        bookmark_id: i64,
+        theme: &TelaTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = &theme.colors;
+        h_flex()
+            .id(("bookmark-refresh", bookmark_id as u64))
+            .role(Role::Button)
+            .aria_label("检查网页更新")
+            .px_2()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .rounded_md()
+            .text_xs()
+            .text_color(hsla(colors.accent))
+            .cursor_pointer()
+            .hover(|style| {
+                style
+                    .bg(hsla(colors.accent))
+                    .text_color(hsla(colors.on_accent))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.refresh_bookmark(bookmark_id, cx);
+            }))
+            .child(icon_element(
+                &theme.icons.refresh,
+                hsla(colors.accent),
+                px(12.),
+            ))
+            .child("刷新")
+            .into_any_element()
     }
 
     /// 收藏行右侧的“移除”按钮；阻止事件冒泡，避免顺带打开这篇。
