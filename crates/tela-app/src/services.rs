@@ -960,7 +960,11 @@ impl AppServices {
 
     // ---- 本地列表 ----
 
-    /// 订阅列表（只读本地库）。
+    /// 订阅列表（只读本地库），按每个博客的最新更新时间倒序。
+    ///
+    /// “最新更新时间”取服务端 `feeds.lastItemAt`；本地行里更新的文章
+    /// （`sortAt` 更大）也算，避免快照未更新时排序落后。两者都没有的
+    /// 博客排在最后，同一时间的按 feed id 升序，保证启动顺序稳定。
     pub fn list_feeds(&self) -> Result<Vec<FeedItem>, TelaError> {
         let store = self.lock_store()?;
         let feeds: Vec<FeedRow> = store.rows_as("feeds")?;
@@ -972,6 +976,28 @@ impl AppServices {
         subscriptions.retain(|subscription| subscription.deleted_at.is_none());
         subscriptions.sort_by_key(|subscription| subscription.feed_id);
         subscriptions.dedup_by_key(|subscription| subscription.feed_id);
+
+        // 最新更新时间按 feed 汇总：先放服务端的 lastItemAt，再用本地文章
+        // 的 sortAt 抬到最新。没有时间信息的 feed 不进入映射（排最后）。
+        let mut latest_by_feed: HashMap<i64, i64> = HashMap::new();
+        for feed in &feeds {
+            if let Some(last_item_at) = feed.last_item_at {
+                latest_by_feed.insert(feed.id, last_item_at);
+            }
+        }
+        for article in &articles {
+            let latest = latest_by_feed
+                .entry(article.feed_id)
+                .or_insert(article.sort_at);
+            *latest = (*latest).max(article.sort_at);
+        }
+        subscriptions.sort_by(|left, right| {
+            let left_at = latest_by_feed.get(&left.feed_id).copied();
+            let right_at = latest_by_feed.get(&right.feed_id).copied();
+            right_at
+                .cmp(&left_at)
+                .then_with(|| left.feed_id.cmp(&right.feed_id))
+        });
 
         let feed_by_id: HashMap<i64, FeedRow> =
             feeds.into_iter().map(|feed| (feed.id, feed)).collect();

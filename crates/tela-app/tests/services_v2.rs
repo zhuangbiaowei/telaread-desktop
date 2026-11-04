@@ -10,7 +10,9 @@ use tela_content::api::ContentApi;
 use tela_content::mock::{MOCK_CONTENT_KEY, MOCK_LONG_CONTENT_KEY, MockContentApi};
 use tela_content::model::TranslationView;
 use tela_net::MockTransport;
-use tela_proto::TelaError;
+use tela_proto::{
+    ArticleRow, FeedRow, Removed, SiteRow, SubscriptionRow, SyncResponse, SyncRows, TelaError,
+};
 use tela_ui::account::AccountMode;
 use tela_ui::shell::ShellData;
 
@@ -24,6 +26,70 @@ fn demo_services() -> AppServices {
             .expect("open in-memory services");
     services.seed_demo().expect("seed demo");
     services
+}
+
+fn sync_page(rows: SyncRows) -> SyncResponse {
+    SyncResponse {
+        cursor: "c1".to_string(),
+        more: false,
+        reset: true,
+        lang: "zh-Hans".to_string(),
+        types: tela_proto::DEFAULT_SYNC_TYPES
+            .iter()
+            .map(|name| name.to_string())
+            .collect(),
+        removed: Removed::default(),
+        rows,
+    }
+}
+
+fn synced_services(rows: SyncRows) -> AppServices {
+    let transport = Arc::new(MockTransport::new());
+    transport.script_pull(sync_page(rows));
+    let services = AppServices::open_in_memory("zh-Hans", content(), transport).unwrap();
+    services.sync_once().expect("sync snapshot");
+    services
+}
+
+fn feed(id: i64, last_item_at: Option<i64>) -> FeedRow {
+    FeedRow {
+        id,
+        site_id: id,
+        feed_url: format!("https://example.com/{id}.xml"),
+        title: Some(format!("博客 {id}")),
+        status: "active".to_string(),
+        last_fetched_at: None,
+        last_item_at,
+    }
+}
+
+fn article(id: i64, feed_id: i64, sort_at: i64) -> ArticleRow {
+    ArticleRow {
+        id,
+        feed_id,
+        url: Some(format!("https://example.com/articles/{id}")),
+        title: format!("文章 {id}"),
+        author: None,
+        published_at: Some(sort_at),
+        fetched_at: sort_at,
+        sort_at,
+        source_lang: Some("en".to_string()),
+        excerpt: None,
+        content_key: None,
+        word_count: 0,
+        reading_minutes: 0,
+        like_count: 0,
+        recommend_count: 0,
+    }
+}
+
+fn subscribed(feed_id: i64, created_at: i64) -> SubscriptionRow {
+    SubscriptionRow {
+        feed_id,
+        watermark_id: 0,
+        created_at,
+        deleted_at: None,
+    }
 }
 
 #[test]
@@ -61,6 +127,70 @@ fn seed_is_idempotent_and_reports_unread_by_the_five_rules() {
         "阅读面板的“打开原文”依赖这个 URL"
     );
     assert!(articles.iter().all(|article| article.unread));
+}
+
+/// 左侧博客列表按每个博客的最新更新时间倒序，而不是订阅/feed id 顺序。
+#[test]
+fn feeds_are_sorted_by_latest_update_time_desc() {
+    let mut rows = SyncRows {
+        sites: (1..=3)
+            .map(|id| SiteRow {
+                id,
+                home_url: format!("https://example.com/{id}"),
+                title: Some(format!("站点 {id}")),
+                description: None,
+                favicon_url: None,
+                primary_lang: Some("en".to_string()),
+                reader_count: 0,
+                translation_allowed: true,
+                claimed: false,
+            })
+            .collect(),
+        ..SyncRows::default()
+    };
+    // feed 2 的 lastItemAt 最新；feed 1 有更新的本地文章；feed 3 没有
+    // lastItemAt，只能靠本地文章时间。
+    rows.feeds.push(feed(1, Some(100)));
+    rows.feeds.push(feed(2, Some(500)));
+    rows.feeds.push(feed(3, None));
+    rows.subscriptions.push(subscribed(1, 10));
+    rows.subscriptions.push(subscribed(2, 20));
+    rows.subscriptions.push(subscribed(3, 30));
+    rows.articles.push(article(11, 1, 900));
+    rows.articles.push(article(21, 2, 400));
+    rows.articles.push(article(31, 3, 700));
+
+    let services = synced_services(rows);
+    let ids: Vec<i64> = services
+        .list_feeds()
+        .unwrap()
+        .into_iter()
+        .map(|feed| feed.id)
+        .collect();
+    assert_eq!(ids, vec![1, 3, 2], "900 > 700 > 500");
+}
+
+/// 同一更新时间按 feed id 升序；完全没有时间的博客排在最后。
+#[test]
+fn feeds_with_equal_or_missing_update_time_fall_back_to_feed_id() {
+    let mut rows = SyncRows::default();
+    rows.feeds.push(feed(4, None));
+    rows.feeds.push(feed(3, Some(500)));
+    rows.feeds.push(feed(1, None));
+    rows.feeds.push(feed(2, Some(500)));
+    rows.subscriptions.push(subscribed(4, 10));
+    rows.subscriptions.push(subscribed(3, 20));
+    rows.subscriptions.push(subscribed(1, 30));
+    rows.subscriptions.push(subscribed(2, 40));
+
+    let services = synced_services(rows);
+    let ids: Vec<i64> = services
+        .list_feeds()
+        .unwrap()
+        .into_iter()
+        .map(|feed| feed.id)
+        .collect();
+    assert_eq!(ids, vec![2, 3, 1, 4]);
 }
 
 #[test]
