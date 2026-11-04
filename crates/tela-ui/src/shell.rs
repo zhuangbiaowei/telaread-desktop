@@ -170,7 +170,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// 实现方负责把本地库的行解成 [`FeedItem`] / [`ArticleItem`]；
 /// UI 层不关心 SQLite 或 wire JSON。
 pub trait ShellData: Send + Sync {
-    /// 全部在用订阅，按 feed id 升序。
+    /// 全部在用订阅，按每个博客的最新更新时间倒序（没有时间的排最后）。
     fn feeds(&self) -> Result<Vec<FeedItem>, TelaError>;
 
     /// 某个订阅下的文章，按列表排序时间倒序。
