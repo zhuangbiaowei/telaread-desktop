@@ -382,6 +382,38 @@ fn captures_list_scroll_following_selection() {
     save_png(&mut cx, handle.into(), "s9-list-scroll-feeds.png");
 }
 
+/// `Ctrl+R` 阅读模式的截图（PR 前后对比/验收用）。
+///
+/// 同一个 1280×800 窗口、同一篇文章：先截三栏常态，再按 `Ctrl+R`
+/// 截「只留右侧正文、正文列宽为窗口 70%」的阅读模式。
+#[test]
+#[ignore = "需要本机 WGPU headless renderer；CI 无 GPU 适配器"]
+fn captures_reading_mode() {
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::AllAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(DemoData);
+    let content = content();
+    let handle = cx
+        .open_window(size(px(1280.), px(800.)), move |_, cx| {
+            cx.new(|cx| ShellView::new(data, content, cx))
+        })
+        .expect("open headless window");
+
+    // 首帧拿焦点，第二帧等正文取数完成。
+    draw_frame(&mut cx, handle.into());
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+    save_png(&mut cx, handle.into(), "s10-reading-mode-before.png");
+
+    press_key(&mut cx, handle.into(), "ctrl-r");
+    save_png(&mut cx, handle.into(), "s10-reading-mode-after.png");
+}
+
 /// 主题选择器 + 不同主题的截图（README/验收用）。
 ///
 /// 先截默认深色主题下的三栏 + 主题选择器，再切到浅色主题截同样的三栏，

@@ -240,6 +240,47 @@ fn shell_renders_and_switches_feeds(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn ctrl_r_toggles_reading_mode(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let data = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 1, 1)],
+        articles: HashMap::from([(1, vec![article(42, 1, "Hello Tela")])]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        ..FakeData::default()
+    });
+    let data_for_view: Arc<dyn ShellData> = data;
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| ShellView::new(data_for_view, content(), cx))
+    });
+    let reader = view.read_with(cx, |view, _| view.reader());
+    draw_once(cx, window);
+    cx.run_until_parked();
+    draw_once(cx, window);
+
+    // Ctrl+R 进入阅读模式：外壳与阅读面板同时切换，下一帧仍能画出来。
+    assert!(!view.read_with(cx, |view, _| view.reading_mode()));
+    cx.simulate_keystrokes(window, "ctrl-r");
+    assert!(view.read_with(cx, |view, _| view.reading_mode()));
+    assert!(reader.read_with(cx, |reader, _| reader.reading_mode()));
+    draw_once(cx, window);
+
+    // 再按一次退出，两侧列表恢复。
+    cx.simulate_keystrokes(window, "ctrl-r");
+    assert!(!view.read_with(cx, |view, _| view.reading_mode()));
+    assert!(!reader.read_with(cx, |reader, _| reader.reading_mode()));
+
+    // 主题选择器是模态：Ctrl+R 不能在遮罩后面切换布局。
+    view.update(cx, |view, cx| view.open_theme_picker(cx));
+    cx.simulate_keystrokes(window, "ctrl-r");
+    assert!(
+        !view.read_with(cx, |view, _| view.reading_mode()),
+        "模态打开时 Ctrl+R 不应切换阅读模式"
+    );
+    view.update(cx, |view, cx| view.close_theme_picker(cx));
+}
+
+#[gpui::test]
 fn shell_renders_empty_state_without_panicking(cx: &mut TestAppContext) {
     cx.update(gpui_kit::init);
 
@@ -256,6 +297,10 @@ fn shell_renders_empty_state_without_panicking(cx: &mut TestAppContext) {
         assert_eq!(model.status_line(), "还没有订阅");
     })
     .unwrap();
+
+    // 没有正文可选时，Ctrl+R 不进入只剩空态的阅读模式。
+    cx.simulate_keystrokes(window, "ctrl-r");
+    assert!(!view.read_with(cx, |view, _| view.reading_mode()));
 }
 
 /// 键盘快捷键：j/k 文章，Shift+j/k 博客；事件从阅读面板冒泡到外壳。
