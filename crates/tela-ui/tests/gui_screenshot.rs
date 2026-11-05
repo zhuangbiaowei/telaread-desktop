@@ -8,13 +8,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{AppContext, HeadlessAppContext, Keystroke, px, size};
 use tela_content::api::{ChapterRequest, ContentApi};
 use tela_content::mock::{MOCK_CONTENT_KEY, MockContentApi};
 use tela_proto::TelaError;
 use tela_ui::gui::ShellView;
-use tela_ui::shell::{ArticleItem, BookmarkItem, BookmarkService, FeedItem, ShellData};
+use tela_ui::shell::{
+    ArticleItem, BookmarkItem, BookmarkService, FeedItem, OfflineCacheProgress, OfflineCacheReport,
+    OfflineCacheService, ShellData,
+};
 
 struct DemoData;
 
@@ -479,4 +483,65 @@ fn captures_theme_picker_and_light_theme() {
     cx.run_until_parked();
     draw_frame(&mut cx, handle.into());
     save_png(&mut cx, handle.into(), "s10-theme-paper.png");
+}
+
+/// 离线缓存失败提示的截图（PR 前后对比/验收用）。
+///
+/// 修复前：失败提示停在侧栏左上角，且不会自己消失；
+/// 修复后：提示在窗口底部，3 秒后自动消失。
+struct FailingCache;
+
+impl OfflineCacheService for FailingCache {
+    fn cache_feed(
+        &self,
+        feed_id: i64,
+        progress: &(dyn Fn(OfflineCacheProgress) + Send + Sync),
+    ) -> Result<OfflineCacheReport, TelaError> {
+        progress(OfflineCacheProgress {
+            feed_id,
+            total: 2,
+            done: 1,
+            originals: 1,
+            ..OfflineCacheProgress::default()
+        });
+        Err(TelaError::Config {
+            detail: "模拟网络中断：无法拉取离线缓存".to_string(),
+        })
+    }
+}
+
+#[test]
+#[ignore = "需要本机 WGPU headless renderer；CI 无 GPU 适配器"]
+fn captures_failure_toast() {
+    let mut cx = HeadlessAppContext::with_platform(
+        gpui_kit::platform::current_platform(true).text_system(),
+        Arc::new(gpui_kit::assets::AllAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(DemoData);
+    let content = content();
+    let cache: Arc<dyn OfflineCacheService> = Arc::new(FailingCache);
+    let handle = cx
+        .open_window(size(px(1100.), px(720.)), move |_, cx| {
+            cx.new(|cx| ShellView::new_with_services(data, content, None, Some(cache), cx))
+        })
+        .expect("open headless window");
+    let view = cx.update(|cx| handle.entity(cx)).expect("root view entity");
+
+    // 首帧完成布局，再触发一次必然失败的离线缓存。
+    draw_frame(&mut cx, handle.into());
+    cx.run_until_parked();
+    cx.update_window(handle.into(), |_, window, cx| {
+        view.update(cx, |view, cx| view.cache_feed(1, cx));
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    // 后台任务立即失败；进度轮询每 200ms 收尾一次。
+    cx.advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    draw_frame(&mut cx, handle.into());
+    save_png(&mut cx, handle.into(), "s11-failure-toast.png");
 }

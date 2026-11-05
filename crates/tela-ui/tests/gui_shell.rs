@@ -685,7 +685,7 @@ fn cache_button_runs_prefetch_and_reports_progress(cx: &mut TestAppContext) {
     assert_eq!(progress.originals, 2);
     assert_eq!(progress.translations, 1);
     let notice = view
-        .read_with(cx, |view, _| view.cache_notice().map(str::to_string))
+        .read_with(cx, |view, _| view.toast().map(str::to_string))
         .expect("完成后应有一句提示");
     assert!(notice.contains("Tela 示例博客"), "{notice}");
     assert!(notice.contains("新缓存原文 2 篇"), "{notice}");
@@ -693,6 +693,66 @@ fn cache_button_runs_prefetch_and_reports_progress(cx: &mut TestAppContext) {
     assert_eq!(
         view.read_with(cx, |view, _| view.model().selected_feed),
         Some(1)
+    );
+}
+
+/// 后台缓存失败的测试替身：立即返回错误，用来验证底部提示与自动消失。
+struct FailingCache;
+
+impl OfflineCacheService for FailingCache {
+    fn cache_feed(
+        &self,
+        _feed_id: i64,
+        _progress: &(dyn Fn(OfflineCacheProgress) + Send + Sync),
+    ) -> Result<OfflineCacheReport, TelaError> {
+        Err(TelaError::Config {
+            detail: "模拟网络中断".to_string(),
+        })
+    }
+}
+
+/// 后台任务失败：提示出现在底部，3 秒后自动消失，不再滞留在侧栏顶部。
+#[gpui::test]
+fn cache_failure_toast_disappears_after_three_seconds(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+
+    let data: Arc<dyn ShellData> = Arc::new(FakeData {
+        feeds: vec![feed(1, "Tela 示例博客", 2, 2)],
+        articles: HashMap::from([(
+            1,
+            vec![article(42, 1, "Hello Tela"), article(43, 1, "长章节")],
+        )]),
+        content_key: Some(MOCK_CONTENT_KEY.to_string()),
+        ..FakeData::default()
+    });
+    let cache: Arc<dyn OfflineCacheService> = Arc::new(FailingCache);
+    let (window, view) = open_window(cx, move |_, cx| {
+        cx.new(|cx| ShellView::new_with_services(data, content(), None, Some(cache), cx))
+    });
+
+    cx.update_window(window, |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .unwrap();
+
+    view.update(cx, |view, cx| view.cache_feed(1, cx));
+    cx.run_until_parked();
+    // 进度轮询任务每 200ms 收尾一次。
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+
+    let failure = view
+        .read_with(cx, |view, _| view.toast().map(str::to_string))
+        .expect("缓存失败后应有一句底部提示");
+    assert!(failure.contains("离线缓存失败"), "{failure}");
+    assert!(failure.contains("模拟网络中断"), "{failure}");
+
+    // 3 秒后自动消失；不依赖用户点击或再次操作。
+    cx.executor().advance_clock(Duration::from_secs(3));
+    cx.run_until_parked();
+    assert!(
+        view.read_with(cx, |view, _| view.toast().is_none()),
+        "失败提示应在 3 秒后自动消失"
     );
 }
 
@@ -771,7 +831,7 @@ fn recommendations_pane_lists_opens_and_cancels(cx: &mut TestAppContext) {
         1
     );
     assert_eq!(
-        view.read_with(cx, |view, _| view.recommend_notice().map(str::to_string))
+        view.read_with(cx, |view, _| view.toast().map(str::to_string))
             .as_deref(),
         Some("已取消推荐。")
     );
@@ -1016,7 +1076,7 @@ fn shift_b_opens_dialog_and_saves_a_bookmark(cx: &mut TestAppContext) {
     let model = cx.update(|cx| view.read(cx).model().clone());
     assert_eq!(model.bookmarks.len(), 1, "收藏列表应立刻刷新");
     assert!(
-        view.read_with(cx, |view, _| view.bookmark_notice().map(str::to_string))
+        view.read_with(cx, |view, _| view.toast().map(str::to_string))
             .as_deref()
             .is_some_and(|notice| notice.contains("收藏的网页")),
         "应给出收藏成功的提示"
@@ -1124,10 +1184,7 @@ fn bookmarks_pane_lists_and_removes(cx: &mut TestAppContext) {
         assert_eq!(view.read(cx).model().bookmarks.len(), 1);
         assert_eq!(view.read(cx).reader().read(cx).bookmark_id(), None);
         assert_eq!(
-            view.read(cx)
-                .bookmark_notice()
-                .map(str::to_string)
-                .as_deref(),
+            view.read(cx).toast().map(str::to_string).as_deref(),
             Some("已从收藏中移除。")
         );
     })
@@ -1276,7 +1333,7 @@ fn bookmark_update_from_the_web_refreshes_the_list_and_reader(cx: &mut TestAppCo
     let title = cx.update(|cx| view.read(cx).model().bookmarks[0].title.clone());
     assert_eq!(title, "网页上更新后的标题", "网页更新应写回收藏列表");
     let notice = cx
-        .update(|cx| view.read(cx).bookmark_notice().map(str::to_string))
+        .update(|cx| view.read(cx).toast().map(str::to_string))
         .unwrap_or_default();
     assert!(
         notice.contains("本地缓存已刷新"),
