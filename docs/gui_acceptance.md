@@ -229,6 +229,7 @@ cargo test -p tela-ui --features gui-test --test gui_screenshot -- --ignored --n
 | 条目跳转滚动：`j` 连按 12 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll articles](images/gui-list-scroll-articles.png) |
 | 条目跳转滚动：`Shift+j` 连按 9 次（上为 `main` 基线 99e3f59，下为修复后） | ![list scroll feeds](images/gui-list-scroll-feeds.png) |
 | 左侧博客列表按最新更新时间倒序（左为 `main` 基线 682e9bd，右为修复后；749×910 真实窗口） | ![feeds sort by update](images/gui-feeds-sort-by-update.png) |
+| 后台失败提示（上为 `main` 基线 f49adad：停在侧栏左上角；下为修复后：窗口底部、3 秒后自动消失；1100×720 headless 渲染） | ![failure toast](images/gui-failure-toast.png) |
 | S9 主题选择器（深色） | ![theme picker](images/gui-theme-picker.png) |
 | S9 浅色主题（Catppuccin Latte） | ![theme light](images/gui-theme-light.png) |
 | S9 纸页主题（Paper，衬线正文 + 书页图标） | ![theme paper](images/gui-theme-paper.png) |

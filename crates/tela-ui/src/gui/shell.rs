@@ -34,6 +34,27 @@ pub const HOME_URL: &str = "https://telaread.com";
 /// 避免在收藏列表里来回切换时反复请求同一篇。
 const BOOKMARK_REVALIDATE_INTERVAL: Duration = Duration::from_secs(60);
 
+/// 窗口底部临时提示的展示时长；到点自动消失。
+const TOAST_DURATION: Duration = Duration::from_secs(3);
+
+/// 底部提示的语气：失败用 danger 色，其余用普通正文色。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToastTone {
+    Info,
+    Error,
+}
+
+/// 一条窗口底部的临时提示。
+#[derive(Clone, Debug)]
+struct ToastMessage {
+    /// 自增 id：新提示覆盖旧提示后，旧定时器不能把新提示清掉。
+    id: u64,
+    /// 展示给用户的文案。
+    text: String,
+    /// 失败或普通状态。
+    tone: ToastTone,
+}
+
 /// 三栏外壳视图：左订阅、中文章、右阅读面板。
 pub struct ShellView {
     data: Arc<dyn ShellData>,
@@ -43,9 +64,12 @@ pub struct ShellView {
     accounts: Option<Arc<dyn AccountService>>,
     account: AccountStatus,
     login: LoginPhase,
-    account_notice: Option<String>,
-    /// 打开 TelaRead 主页失败时的提示（成功不打扰用户）。
-    home_notice: Option<String>,
+    /// 窗口底部的临时提示（失败/状态），展示 [`TOAST_DURATION`] 后自动消失。
+    toast: Option<ToastMessage>,
+    /// 提示自增 id，用来作废旧提示的定时器。
+    toast_id: u64,
+    /// 提示自动消失任务；必须保活，替换时取消旧任务。
+    toast_task: Option<Task<()>>,
     login_generation: u64,
     login_task: Option<Task<()>>,
     sync_in_flight: bool,
@@ -57,20 +81,14 @@ pub struct ShellView {
     offline_cache: Option<Arc<dyn OfflineCacheService>>,
     /// 每个订阅最近一次缓存进度（左侧按钮显示它）。
     cache_progress: HashMap<i64, OfflineCacheProgress>,
-    /// 缓存完成/失败的一句提示（侧栏顶部）。
-    cache_notice: Option<String>,
     /// 后台缓存任务与进度轮询任务，必须保活。
     cache_tasks: Vec<Task<()>>,
     /// 推荐写能力；测试/只读装配可以为空（推荐按钮不显示）。
     recommendations: Option<Arc<dyn RecommendationService>>,
-    /// 推荐列表上的一句提示（完成/失败）。
-    recommend_notice: Option<String>,
     /// 网页收藏写能力；测试/只读装配可以为空（收藏弹窗会给出提示）。
     bookmarks: Option<Arc<dyn BookmarkService>>,
     /// 收藏网页弹窗；`None` 表示关闭。弹窗自己负责下载与错误提示。
     bookmark_dialog: Option<Entity<BookmarkDialogView>>,
-    /// 收藏成功/失败/更新的一句提示（侧栏顶部与收藏列表）。
-    bookmark_notice: Option<String>,
     /// 收藏弹窗的事件订阅；必须保活。
     bookmark_subscription: Option<Subscription>,
     /// 每条收藏最近一次检查网页更新的时间（避免来回切换时反复抓同一页）。
@@ -222,8 +240,9 @@ impl ShellView {
             accounts,
             account,
             login: LoginPhase::Idle,
-            account_notice: None,
-            home_notice: None,
+            toast: None,
+            toast_id: 0,
+            toast_task: None,
             login_generation: 0,
             login_task: None,
             sync_in_flight: false,
@@ -232,13 +251,10 @@ impl ShellView {
             refresh_after_sync: false,
             offline_cache,
             cache_progress: HashMap::new(),
-            cache_notice: None,
             cache_tasks: Vec::new(),
             recommendations,
-            recommend_notice: None,
             bookmarks,
             bookmark_dialog: None,
-            bookmark_notice: None,
             bookmark_subscription: None,
             bookmark_checks: HashMap::new(),
             bookmark_refreshing: HashSet::new(),
@@ -346,6 +362,45 @@ impl ShellView {
             || self.reader.read(cx).recommend_dialog_open()
     }
 
+    /// 当前窗口底部的临时提示（测试/诊断用）。
+    pub fn toast(&self) -> Option<&str> {
+        self.toast.as_ref().map(|toast| toast.text.as_str())
+    }
+
+    /// 在窗口底部展示一条提示；新提示覆盖旧提示，并在 [`TOAST_DURATION`] 后消失。
+    ///
+    /// 失败和状态更新都走这里：提示不会在侧栏顶部堆叠或一直滞留。
+    fn show_toast(&mut self, text: impl Into<String>, tone: ToastTone, cx: &mut Context<Self>) {
+        self.toast_id = self.toast_id.wrapping_add(1);
+        let id = self.toast_id;
+        self.toast = Some(ToastMessage {
+            id,
+            text: text.into(),
+            tone,
+        });
+        let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(TOAST_DURATION).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.toast.as_ref().is_some_and(|toast| toast.id == id) {
+                    view.toast = None;
+                    cx.notify();
+                }
+            });
+        });
+        self.toast_task = Some(task);
+        cx.notify();
+    }
+
+    /// 底部失败提示：红色文字，3 秒后自动消失。
+    fn show_error_toast(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show_toast(text, ToastTone::Error, cx);
+    }
+
+    /// 底部普通状态提示：3 秒后自动消失。
+    fn show_info_toast(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.show_toast(text, ToastTone::Info, cx);
+    }
+
     /// 打开主题选择器；每次打开都重扫主题目录，方便边改文件边看效果。
     pub fn open_theme_picker(&mut self, cx: &mut Context<Self>) {
         self.themes.reload();
@@ -419,28 +474,16 @@ impl ShellView {
         true
     }
 
-    /// 打开 TelaRead 主页失败时的提示（测试/诊断用）。
-    pub fn home_notice(&self) -> Option<&str> {
-        self.home_notice.as_deref()
-    }
-
     /// 用系统浏览器打开 TelaRead 主页（左上角品牌文字）。
     pub fn open_home(&mut self, cx: &mut Context<Self>) {
-        match tela_net::browser::open(HOME_URL) {
-            Ok(()) => self.home_notice = None,
-            Err(error) => self.home_notice = Some(format!("打开 TelaRead 主页失败：{error}")),
+        if let Err(error) = tela_net::browser::open(HOME_URL) {
+            self.show_error_toast(format!("打开 TelaRead 主页失败：{error}"), cx);
         }
-        cx.notify();
     }
 
     /// 某个订阅当前的离线缓存进度（测试/按钮文案用）。
     pub fn cache_progress(&self, feed_id: i64) -> Option<&OfflineCacheProgress> {
         self.cache_progress.get(&feed_id)
-    }
-
-    /// 最近一次缓存完成/失败的提示。
-    pub fn cache_notice(&self) -> Option<&str> {
-        self.cache_notice.as_deref()
     }
 
     /// 点击博客名旁的“缓存”按钮：后台缓存该订阅所有未缓存的原文与译文。
@@ -456,8 +499,7 @@ impl ShellView {
             return;
         }
         let Some(cache) = self.offline_cache.clone() else {
-            self.cache_notice = Some("当前装配不支持离线缓存".to_string());
-            cx.notify();
+            self.show_error_toast("当前装配不支持离线缓存", cx);
             return;
         };
         let title = self
@@ -478,7 +520,7 @@ impl ShellView {
             feed_id,
             progress.lock().map(|p| p.clone()).unwrap_or_default(),
         );
-        self.cache_notice = Some(format!("开始离线缓存「{title}」…"));
+        self.show_info_toast(format!("开始离线缓存「{title}」…"), cx);
 
         // 后台线程做网络/磁盘；进度回调只写共享快照，不直接碰 UI。
         let background_progress = Arc::clone(&progress);
@@ -517,7 +559,7 @@ impl ShellView {
                 let keep_going = this.update(cx, |view, cx| {
                     view.cache_progress.insert(feed_id, snapshot.clone());
                     if finished {
-                        view.finish_cache(feed_id, &title, result);
+                        view.finish_cache(feed_id, &title, result, cx);
                     }
                     cx.notify();
                     !finished
@@ -533,12 +575,13 @@ impl ShellView {
         cx.notify();
     }
 
-    /// 缓存收尾：把最终结果写进提示，并把进度快照标记为完成。
+    /// 缓存收尾：把最终结果写进底部提示，并把进度快照标记为完成。
     fn finish_cache(
         &mut self,
         feed_id: i64,
         title: &str,
         result: Option<Result<OfflineCacheReport, TelaError>>,
+        cx: &mut Context<Self>,
     ) {
         match result {
             Some(Ok(report)) => {
@@ -547,10 +590,12 @@ impl ShellView {
                     .first()
                     .map(|error| format!("；{error}"))
                     .unwrap_or_default();
-                self.cache_notice = Some(format!(
-                    "「{title}」离线缓存完成：{}{detail}",
-                    report.summary()
-                ));
+                let text = format!("「{title}」离线缓存完成：{}{detail}", report.summary());
+                if report.failed > 0 || !report.errors.is_empty() {
+                    self.show_error_toast(text, cx);
+                } else {
+                    self.show_info_toast(text, cx);
+                }
                 let mut progress = self
                     .cache_progress
                     .get(&feed_id)
@@ -567,14 +612,14 @@ impl ShellView {
                 self.cache_progress.insert(feed_id, progress);
             }
             Some(Err(error)) => {
-                self.cache_notice = Some(format!("「{title}」离线缓存失败：{error}"));
+                self.show_error_toast(format!("「{title}」离线缓存失败：{error}"), cx);
                 if let Some(progress) = self.cache_progress.get_mut(&feed_id) {
                     progress.finished = true;
                     progress.failed += 1;
                 }
             }
             None => {
-                self.cache_notice = Some(format!("「{title}」离线缓存任务结束，但没有拿到结果"));
+                self.show_error_toast(format!("「{title}」离线缓存任务结束，但没有拿到结果"), cx);
             }
         }
     }
@@ -583,7 +628,6 @@ impl ShellView {
     pub fn select_feed(&mut self, feed_id: i64, cx: &mut Context<Self>) -> bool {
         let changed = self.model.select_feed(feed_id, self.data.as_ref());
         if changed {
-            self.recommend_notice = None;
             self.sync_reader(cx);
             // 切订阅会显示该订阅的第一篇，视同打开。
             if let Some(article_id) = self.model.selected_article {
@@ -600,7 +644,6 @@ impl ShellView {
     pub fn show_recommendations(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.model.show_recommendations(self.data.as_ref());
         if changed {
-            self.recommend_notice = None;
             // 回到推荐栏时，如果之前选过一条，就把阅读面板切回那篇；
             // 没选过则保持当前阅读内容，不自动打开推荐（避免误标已读）。
             self.sync_reader(cx);
@@ -625,8 +668,7 @@ impl ShellView {
     /// 从推荐列表撤回一条推荐；本地立即生效，后台补一次同步。
     pub fn cancel_recommendation(&mut self, article_id: i64, cx: &mut Context<Self>) {
         let Some(service) = self.recommendations.clone() else {
-            self.recommend_notice = Some("当前装配不支持推荐".to_string());
-            cx.notify();
+            self.show_error_toast("当前装配不支持推荐", cx);
             return;
         };
         match service.unrecommend(article_id) {
@@ -635,24 +677,14 @@ impl ShellView {
                 self.reader.update(cx, |reader, cx| {
                     reader.refresh_recommendation(cx);
                 });
-                self.recommend_notice = Some("已取消推荐。".to_string());
+                self.show_info_toast("已取消推荐。", cx);
                 self.schedule_sync(cx);
             }
             Err(error) => {
-                self.recommend_notice = Some(format!("取消推荐失败：{error}"));
+                self.show_error_toast(format!("取消推荐失败：{error}"), cx);
             }
         }
         cx.notify();
-    }
-
-    /// 最近一次推荐操作的结果提示（测试/诊断用）。
-    pub fn recommend_notice(&self) -> Option<&str> {
-        self.recommend_notice.as_deref()
-    }
-
-    /// 最近一次收藏操作的结果提示（测试/诊断用）。
-    pub fn bookmark_notice(&self) -> Option<&str> {
-        self.bookmark_notice.as_deref()
     }
 
     /// 收藏弹窗是否打开（测试/诊断用）。
@@ -677,8 +709,7 @@ impl ShellView {
             return;
         }
         if self.bookmarks.is_none() {
-            self.bookmark_notice = Some("当前装配不支持收藏网页".to_string());
-            cx.notify();
+            self.show_error_toast("当前装配不支持收藏网页", cx);
             return;
         }
 
@@ -696,7 +727,6 @@ impl ShellView {
         );
         self.bookmark_dialog = Some(dialog);
         self.bookmark_subscription = Some(subscription);
-        self.bookmark_notice = None;
         cx.notify();
     }
 
@@ -714,7 +744,7 @@ impl ShellView {
         self.model.reload(self.data.as_ref());
         // 刚下载的就是最新版本，别再触发一次“检查网页更新”。
         self.bookmark_checks.insert(item.id, Instant::now());
-        self.bookmark_notice = Some(format!("已收藏「{}」到「我的收藏」", item.title));
+        self.show_info_toast(format!("已收藏「{}」到「我的收藏」", item.title), cx);
         if self.model.section == ShellSection::Bookmarks {
             self.model.select_bookmark(item.id);
             self.sync_reader(cx);
@@ -732,7 +762,6 @@ impl ShellView {
     pub fn show_bookmarks(&mut self, cx: &mut Context<Self>) -> bool {
         let changed = self.model.show_bookmarks(self.data.as_ref());
         if changed {
-            self.bookmark_notice = None;
             self.sync_reader(cx);
             cx.notify();
         }
@@ -752,15 +781,14 @@ impl ShellView {
     /// 从「我的收藏」里删除一条；本地立即生效（收藏不参与同步）。
     pub fn remove_bookmark(&mut self, bookmark_id: i64, cx: &mut Context<Self>) {
         let Some(service) = self.bookmarks.clone() else {
-            self.bookmark_notice = Some("当前装配不支持收藏网页".to_string());
-            cx.notify();
+            self.show_error_toast("当前装配不支持收藏网页", cx);
             return;
         };
         match service.remove_bookmark(bookmark_id) {
             Ok(()) => {
                 let was_selected = self.model.selected_bookmark == Some(bookmark_id);
                 self.model.reload(self.data.as_ref());
-                self.bookmark_notice = Some("已从收藏中移除。".to_string());
+                self.show_info_toast("已从收藏中移除。", cx);
                 if was_selected {
                     // 删掉的正是正在读的这篇：阅读面板退回空态，避免继续显示已删正文。
                     self.reader.update(cx, |reader, cx| {
@@ -770,7 +798,7 @@ impl ShellView {
                 }
             }
             Err(error) => {
-                self.bookmark_notice = Some(format!("移除收藏失败：{error}"));
+                self.show_error_toast(format!("移除收藏失败：{error}"), cx);
             }
         }
         cx.notify();
@@ -792,13 +820,12 @@ impl ShellView {
         }
         if article_id.is_some() {
             if self.accounts.is_none() {
-                self.account_notice = Some("当前装配不支持同步，无法刷新文章".to_string());
+                self.show_error_toast("当前装配不支持同步，无法刷新文章", cx);
             } else {
-                self.account_notice = Some("正在同步最新文章…".to_string());
+                self.show_info_toast("正在同步最新文章…", cx);
                 self.refresh_after_sync = true;
                 self.schedule_sync(cx);
             }
-            cx.notify();
         }
     }
 
@@ -834,8 +861,7 @@ impl ShellView {
     ) {
         let Some(service) = self.bookmarks.clone() else {
             if user_initiated {
-                self.bookmark_notice = Some("当前装配不支持刷新收藏".to_string());
-                cx.notify();
+                self.show_error_toast("当前装配不支持刷新收藏", cx);
             }
             return;
         };
@@ -845,8 +871,7 @@ impl ShellView {
         // 先记时间：即使网络很慢，也不会在下载期间被反复触发。
         self.bookmark_checks.insert(bookmark_id, Instant::now());
         if user_initiated {
-            self.bookmark_notice = Some("正在检查网页更新…".to_string());
-            cx.notify();
+            self.show_info_toast("正在检查网页更新…", cx);
         }
         let task = cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = cx
@@ -862,18 +887,18 @@ impl ShellView {
                             if view.reader.read(cx).bookmark_id() == Some(bookmark_id) {
                                 view.reader.update(cx, |reader, cx| reader.reload(cx));
                             }
-                            view.bookmark_notice = Some(format!(
-                                "「{}」已在网页上更新，本地缓存已刷新",
-                                refresh.item.title
-                            ));
+                            view.show_info_toast(
+                                format!("「{}」已在网页上更新，本地缓存已刷新", refresh.item.title),
+                                cx,
+                            );
                         } else if user_initiated {
-                            view.bookmark_notice = Some("网页没有新的变化".to_string());
+                            view.show_info_toast("网页没有新的变化", cx);
                         }
                     }
                     Err(error) => {
                         // 后台检查失败不打扰阅读：旧正文仍然可读。
                         if user_initiated {
-                            view.bookmark_notice = Some(format!("刷新失败：{error}"));
+                            view.show_error_toast(format!("刷新失败：{error}"), cx);
                         }
                     }
                 }
@@ -1105,8 +1130,7 @@ impl ShellView {
             }
             Ok(false) => false,
             Err(error) => {
-                self.account_notice = Some(format!("标记已读失败：{error}"));
-                cx.notify();
+                self.show_error_toast(format!("标记已读失败：{error}"), cx);
                 false
             }
         }
@@ -1138,11 +1162,11 @@ impl ShellView {
                 match &result {
                     Ok(()) => {
                         if refresh_requested {
-                            view.account_notice = Some("已同步最新文章".to_string());
+                            view.show_info_toast("已同步最新文章", cx);
                         }
                     }
                     Err(error) => {
-                        view.account_notice = Some(format!("本地变更已入队，但同步失败：{error}"));
+                        view.show_error_toast(format!("本地变更已入队，但同步失败：{error}"), cx);
                     }
                 }
                 view.reload(cx);
@@ -1349,14 +1373,6 @@ impl ShellView {
             }
         }
 
-        if let Some(notice) = &self.account_notice {
-            panel = panel.child(
-                div()
-                    .text_xs()
-                    .text_color(hsla(colors.muted))
-                    .child(notice.clone()),
-            );
-        }
         panel
     }
 
@@ -1364,7 +1380,6 @@ impl ShellView {
     pub fn start_login(&mut self, cx: &mut Context<Self>) {
         let Some(accounts) = self.accounts.clone() else {
             self.login = LoginPhase::Error("当前是 demo 装配，没有账号能力".into());
-            self.account_notice = None;
             cx.notify();
             return;
         };
@@ -1374,19 +1389,18 @@ impl ShellView {
             Ok(ticket) => {
                 // 终端里也打印一份：浏览器打不开时用户可直接复制。
                 eprintln!("tela-gui: 授权地址 {}", ticket.auth_url);
-                let open_error = accounts.open_auth_url(&ticket).err();
-                self.account_notice = Some(match open_error {
-                    Some(error) => {
-                        format!("浏览器未打开：{error}；链接已打印到终端，可点「复制链接」")
-                    }
-                    None => "已在浏览器打开授权页，等待授权…".to_string(),
-                });
+                match accounts.open_auth_url(&ticket).err() {
+                    Some(error) => self.show_error_toast(
+                        format!("浏览器未打开：{error}；链接已打印到终端，可点「复制链接」"),
+                        cx,
+                    ),
+                    None => self.show_info_toast("已在浏览器打开授权页，等待授权…", cx),
+                }
                 self.login = LoginPhase::Waiting(ticket.clone());
                 self.spawn_login(accounts, ticket, generation, cx);
             }
             Err(error) => {
                 self.login = LoginPhase::Error(error.to_string());
-                self.account_notice = None;
             }
         }
         cx.notify();
@@ -1417,14 +1431,13 @@ impl ShellView {
                     Ok((status, sync)) => {
                         view.account = status;
                         view.login = LoginPhase::Idle;
-                        view.account_notice = sync
-                            .err()
-                            .map(|error| format!("登录成功，但同步失败：{error}"));
+                        if let Err(error) = sync {
+                            view.show_error_toast(format!("登录成功，但同步失败：{error}"), cx);
+                        }
                         view.reload(cx);
                     }
                     Err(error) => {
                         view.login = LoginPhase::Error(error.to_string());
-                        view.account_notice = None;
                     }
                 }
                 cx.notify();
@@ -1442,12 +1455,11 @@ impl ShellView {
             return;
         };
         match accounts.open_auth_url(&ticket) {
-            Ok(()) => self.account_notice = Some("已请求打开浏览器".to_string()),
+            Ok(()) => self.show_info_toast("已请求打开浏览器", cx),
             Err(error) => {
-                self.account_notice = Some(format!("仍无法打开浏览器：{error}；可点「复制链接」"))
+                self.show_error_toast(format!("仍无法打开浏览器：{error}；可点「复制链接」"), cx)
             }
         }
-        cx.notify();
     }
 
     /// 把授权链接放进剪贴板。
@@ -1456,8 +1468,7 @@ impl ShellView {
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(ticket.auth_url));
-        self.account_notice = Some("授权链接已复制到剪贴板".to_string());
-        cx.notify();
+        self.show_info_toast("授权链接已复制到剪贴板", cx);
     }
 
     /// 取消登录：关闭回环端口，并让迟到的后台结果失效。
@@ -1467,8 +1478,7 @@ impl ShellView {
         }
         self.login_generation = self.login_generation.wrapping_add(1);
         self.login = LoginPhase::Idle;
-        self.account_notice = Some("已取消登录".to_string());
-        cx.notify();
+        self.show_info_toast("已取消登录", cx);
     }
 
     /// 退出登录：撤销令牌、清本地账号数据、刷新列表。
@@ -1484,13 +1494,13 @@ impl ShellView {
         match accounts.logout() {
             Ok(status) => {
                 self.account = status;
-                self.account_notice = Some("已退出登录".to_string());
+                self.show_info_toast("已退出登录", cx);
                 self.reload(cx);
             }
             Err(error) => {
                 // 本地凭据通常已经被清掉，状态以服务端/本地真实值为准。
                 self.account = accounts.status();
-                self.account_notice = Some(format!("退出时出错：{error}"));
+                self.show_error_toast(format!("退出时出错：{error}"), cx);
             }
         }
         cx.notify();
@@ -1552,18 +1562,7 @@ impl ShellView {
                             .text_xs()
                             .text_color(hsla(colors.subtle))
                             .child(model.status_line()),
-                    )
-                    .when_some(self.home_notice.clone(), |element, notice| {
-                        element.child(
-                            div()
-                                .text_xs()
-                                .text_color(hsla(colors.warning))
-                                .child(notice),
-                        )
-                    })
-                    .when_some(self.cache_notice.clone(), |element, notice| {
-                        element.child(div().text_xs().text_color(hsla(colors.muted)).child(notice))
-                    }),
+                    ),
             )
             .child(self.recommendations_entry(theme, cx))
             .child(self.bookmarks_entry(theme, cx))
@@ -2116,16 +2115,6 @@ impl ShellView {
                             .child(format!("{count} 篇")),
                     ),
             )
-            .when_some(self.recommend_notice.clone(), |element, notice| {
-                element.child(
-                    div()
-                        .px_4()
-                        .pt_2()
-                        .text_xs()
-                        .text_color(hsla(colors.subtle))
-                        .child(notice),
-                )
-            })
             .child(list)
     }
 
@@ -2345,16 +2334,6 @@ impl ShellView {
                             ),
                     ),
             )
-            .when_some(self.bookmark_notice.clone(), |element, notice| {
-                element.child(
-                    div()
-                        .px_4()
-                        .pt_2()
-                        .text_xs()
-                        .text_color(hsla(colors.subtle))
-                        .child(notice),
-                )
-            })
             .child(list)
     }
 
@@ -3000,6 +2979,47 @@ impl ShellView {
             )
             .into_any_element()
     }
+
+    /// 窗口底部的临时提示：居中、覆盖在三栏之上，3 秒后自动消失。
+    fn toast_layer(toast: ToastMessage, theme: &TelaTheme) -> AnyElement {
+        let colors = &theme.colors;
+        let (text_color, border_color) = match toast.tone {
+            ToastTone::Error => (colors.danger, colors.danger),
+            ToastTone::Info => (colors.text, theme.borders.border),
+        };
+        let layer = div()
+            .id("shell-toast")
+            .absolute()
+            .bottom(px(24.))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("shell-toast-message")
+                    .role(Role::Alert)
+                    .max_w(px(760.))
+                    .mx_4()
+                    .px_4()
+                    .py_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(hsla(border_color))
+                    .bg(hsla(colors.surface))
+                    .text_color(hsla(text_color))
+                    .text_sm()
+                    .child(toast.text),
+            );
+        // 从下往上滑入，给“滚动展示”一点可见的动效；不透明，截图/首帧都能读到。
+        layer
+            .with_animation(
+                ("shell-toast", toast.id),
+                Animation::new(Duration::from_millis(180)),
+                |element, delta| element.bottom(px(14. + 10. * delta)),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for ShellView {
@@ -3007,6 +3027,7 @@ impl Render for ShellView {
         // 主题按帧读取：切换后外壳、阅读面板与选择器看到同一份数据。
         let theme = cx.tela_theme();
         let picker = self.theme_picker_layer(&theme, cx);
+        let toast = self.toast.clone();
         // `Ctrl+R` 阅读模式只留右侧正文；两侧列表与它们的数据都不进入本帧元素树。
         let content = if self.reading_mode {
             h_flex()
@@ -3060,6 +3081,9 @@ impl Render for ShellView {
                 }
             }))
             .child(content)
+            .when_some(toast, |element, toast| {
+                element.child(Self::toast_layer(toast, &theme))
+            })
             .when_some(self.bookmark_dialog.clone(), |element, dialog| {
                 element.child(dialog)
             })
