@@ -93,6 +93,8 @@ pub struct ShellView {
     theme_picker_open: bool,
     /// 一次主题操作的结果/错误提示。
     theme_notice: Option<String>,
+    /// `Ctrl+R` 阅读模式：收拢左侧订阅与中间文章列表，只留右侧正文。
+    reading_mode: bool,
     /// 阅读面板的推荐事件订阅；必须保活。
     _reader_subscription: Subscription,
 }
@@ -248,6 +250,7 @@ impl ShellView {
             themes,
             theme_picker_open: false,
             theme_notice: None,
+            reading_mode: false,
             _reader_subscription,
         };
         view.sync_reader(cx);
@@ -307,6 +310,40 @@ impl ShellView {
     /// 最近一次主题操作的提示。
     pub fn theme_notice(&self) -> Option<&str> {
         self.theme_notice.as_deref()
+    }
+
+    /// 是否处于 `Ctrl+R` 阅读模式（测试与渲染用）。
+    pub fn reading_mode(&self) -> bool {
+        self.reading_mode
+    }
+
+    /// 切换 `Ctrl+R` 阅读模式：收拢左侧订阅与中间文章列表，只留右侧正文。
+    ///
+    /// 没有选中正文时保持原布局（此时收拢列表只剩一个空态，没有意义）。
+    pub fn toggle_reading_mode(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.reading_mode && !self.reader.read(cx).has_selection() {
+            return false;
+        }
+        self.set_reading_mode(!self.reading_mode, cx)
+    }
+
+    /// 设置阅读模式；阅读面板据此把正文列收窄到窗口宽度的 70%。
+    pub fn set_reading_mode(&mut self, enabled: bool, cx: &mut Context<Self>) -> bool {
+        if self.reading_mode == enabled {
+            return false;
+        }
+        self.reading_mode = enabled;
+        self.reader
+            .update(cx, |reader, cx| reader.set_reading_mode(enabled, cx));
+        cx.notify();
+        true
+    }
+
+    /// 窗口级模态是否打开；打开时不抢快捷键（`Ctrl+R` 也不能在遮罩后切换）。
+    fn modal_open(&self, cx: &Context<Self>) -> bool {
+        self.theme_picker_open
+            || self.bookmark_dialog.is_some()
+            || self.reader.read(cx).recommend_dialog_open()
     }
 
     /// 打开主题选择器；每次打开都重扫主题目录，方便边改文件边看效果。
@@ -2969,9 +3006,22 @@ impl Render for ShellView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 主题按帧读取：切换后外壳、阅读面板与选择器看到同一份数据。
         let theme = cx.tela_theme();
-        let sidebar = self.sidebar(&theme, cx);
-        let main = self.main_panel(&theme, cx);
         let picker = self.theme_picker_layer(&theme, cx);
+        // `Ctrl+R` 阅读模式只留右侧正文；两侧列表与它们的数据都不进入本帧元素树。
+        let content = if self.reading_mode {
+            h_flex()
+                .size_full()
+                .child(self.reader_pane())
+                .into_any_element()
+        } else {
+            let sidebar = self.sidebar(&theme, cx);
+            let main = self.main_panel(&theme, cx);
+            h_flex()
+                .size_full()
+                .child(sidebar)
+                .child(main)
+                .into_any_element()
+        };
         div()
             .id("shell-root")
             .relative()
@@ -2990,6 +3040,18 @@ impl Render for ShellView {
                     return;
                 }
                 let modifiers = event.keystroke.modifiers;
+                // `Ctrl+R` 切换阅读模式；弹窗/选择器是模态时让位给它们。
+                if modifiers.control
+                    && !modifiers.shift
+                    && !modifiers.alt
+                    && !modifiers.platform
+                    && event.keystroke.key.eq_ignore_ascii_case("r")
+                {
+                    if !this.modal_open(cx) {
+                        this.toggle_reading_mode(cx);
+                    }
+                    return;
+                }
                 if modifiers.control || modifiers.alt || modifiers.platform {
                     return;
                 }
@@ -2997,7 +3059,7 @@ impl Render for ShellView {
                     cx.notify();
                 }
             }))
-            .child(h_flex().size_full().child(sidebar).child(main))
+            .child(content)
             .when_some(self.bookmark_dialog.clone(), |element, dialog| {
                 element.child(dialog)
             })

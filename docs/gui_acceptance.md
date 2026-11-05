@@ -167,6 +167,17 @@
   `ui.toml` 更新、逐个内置主题渲染、选择器打开时锁住阅读快捷键）；`gui_shell` / `gui_reader` / `gui_account` /
   `gui_smoke` 原有 GUI 测试全绿；截图 3 张（选择器、浅色、纸页）。
 
+### S10 阅读模式（`Ctrl+R`，2026-11-05）
+
+- 任意界面按 `Ctrl+R` 收拢左侧订阅与中间文章列表，只保留右侧阅读面板；再按一次恢复。
+- 阅读模式下正文列按窗口全宽的 70% 居中（常态保持原来的单栏 760px 行宽 / 对照视图满宽）。
+- 主题选择器 / 收藏弹窗 / 推荐弹窗是模态：打开时 `Ctrl+R` 不切换布局；
+  阅读面板也不再把这个组合键当成 `r` 重试。
+- 阅读面板底部提示行：常态显示「Ctrl+R 阅读模式」，进入后显示「Ctrl+R 退出阅读模式」。
+- 验收：`gui_shell::ctrl_r_toggles_reading_mode`（进入/退出 + 模态不抢键）、
+  `tela-ui` lib `reading_mode_width_tests`（1280 → 896px、1000 → 700px）、
+  截图 2 张（1280×800 headless：前/后）。
+
 ## 2. 验收命令与实测结果
 
 运行环境：Linux x86_64（Hyprland/Wayland）、`rustc 1.98.1`、`gpui-kit 0.8.0`
@@ -221,6 +232,8 @@ cargo test -p tela-ui --features gui-test --test gui_screenshot -- --ignored --n
 | S9 主题选择器（深色） | ![theme picker](images/gui-theme-picker.png) |
 | S9 浅色主题（Catppuccin Latte） | ![theme light](images/gui-theme-light.png) |
 | S9 纸页主题（Paper，衬线正文 + 书页图标） | ![theme paper](images/gui-theme-paper.png) |
+| S10 阅读模式 Before：常态三栏（基线 `2460d70`，1280×800 headless） | ![reading mode before](images/gui-s10-reading-mode-before.png) |
+| S10 阅读模式 After：`Ctrl+R` 收拢列表、正文 70% 宽（本 PR，1280×800 headless） | ![reading mode after](images/gui-s10-reading-mode-after.png) |
 
 S3 截图由 `gui_screenshot` 用 GPUI `HeadlessAppContext` + WGPU 渲染，和真实窗口共用
 同一套 `ShellView`/`ReaderView` 代码，不依赖显示器。

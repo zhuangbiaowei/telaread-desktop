@@ -35,8 +35,13 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-/// 阅读正文的最大行宽（单栏时居中）。
+/// 阅读正文的最大行宽（常态三栏、单栏时居中）。
 const READING_MAX_WIDTH: f32 = 760.0;
+
+/// 阅读模式（`Ctrl+R`）下正文列占窗口宽度的比例。
+///
+/// 需求见 issue #10：收拢左右列表后，正文宽度为全屏宽度的 70%。
+const READING_MODE_WIDTH_RATIO: f32 = 0.70;
 
 /// 翻译轮询间隔与最多轮数（约一分钟）。
 const TRANSLATION_POLL_INTERVAL: Duration = Duration::from_millis(1600);
@@ -126,6 +131,8 @@ pub struct ReaderView {
     recommend_notice: Option<String>,
     /// 窗口级模态（主题选择器）打开时锁住阅读快捷键，避免 `t`/`j` 在遮罩后面生效。
     input_locked: bool,
+    /// 是否处于 `Ctrl+R` 阅读模式：正文列按窗口宽度收窄，外壳隐藏两侧列表。
+    reading_mode: bool,
 }
 
 impl ReaderView {
@@ -178,6 +185,7 @@ impl ReaderView {
             recommend_error: None,
             recommend_notice: None,
             input_locked: false,
+            reading_mode: false,
         }
     }
 
@@ -196,8 +204,30 @@ impl ReaderView {
         self.bookmark_id
     }
 
+    /// 是否处于 `Ctrl+R` 阅读模式（外壳据此收拢两侧列表）。
+    pub fn reading_mode(&self) -> bool {
+        self.reading_mode
+    }
+
+    /// 由外壳在 `Ctrl+R` 时切换阅读模式；正文列宽随窗口宽度重算。
+    pub fn set_reading_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.reading_mode == enabled {
+            return;
+        }
+        self.reading_mode = enabled;
+        cx.notify();
+    }
+
+    /// 阅读模式下的正文列宽：窗口全宽的 70%（需求见 issue #10）。
+    fn content_width(&self, viewport_width: Pixels) -> Option<Pixels> {
+        self.reading_mode
+            .then(|| reading_mode_content_width(viewport_width))
+    }
+
     /// 当前是否有正文可选择（文章与本地收藏共用阅读面板）。
-    fn has_selection(&self) -> bool {
+    ///
+    /// 外壳在进入 `Ctrl+R` 阅读模式前用它判断：没有正文时切过去只剩空态。
+    pub fn has_selection(&self) -> bool {
         self.article_id.is_some() || self.bookmark_id.is_some()
     }
 
@@ -1193,12 +1223,14 @@ impl ReaderView {
                 div()
                     .text_xs()
                     .text_color(hsla(colors.muted))
-                    .child(if is_bookmark {
-                        "Shift+R 检查更新 · Shift+B 继续收藏 · j/k 文章 · \
+                    .child(if self.reading_mode {
+                        "Ctrl+R 退出阅读模式 · o/c/t 视图 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                    } else if is_bookmark {
+                        "Ctrl+R 阅读模式 · Shift+R 检查更新 · Shift+B 继续收藏 · j/k 文章 · \
                          ↑/↓ 逐行 · PgUp/PgDn 滚动"
                     } else {
-                        "o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · Shift+B 收藏网址 · \
-                         Shift+R 刷新 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
+                        "Ctrl+R 阅读模式 · o/c/t 视图 · j/k 文章 · Shift+j/k 博客 · \
+                         Shift+B 收藏网址 · Shift+R 刷新 · ↑/↓ 逐行 · PgUp/PgDn 滚动"
                     }),
             )
     }
@@ -1258,7 +1290,7 @@ impl ReaderView {
             .into_any_element()
     }
 
-    fn body(&self, cx: &mut Context<Self>) -> Div {
+    fn body(&self, viewport_width: Pixels, cx: &mut Context<Self>) -> Div {
         let theme = cx.tela_theme();
         if !self.has_selection() {
             return self.centered_note("选择一篇文章开始阅读", "左侧选订阅，中间选文章。", &theme);
@@ -1274,16 +1306,16 @@ impl ReaderView {
                 let detail = format!("{message}（已重试 {retries} 次）");
                 self.error_body(&detail, &theme, cx)
             }
-            ReaderState::Ready(_) => self.ready_body(&theme),
+            ReaderState::Ready(_) => self.ready_body(viewport_width, &theme),
         }
     }
 
-    fn ready_body(&self, theme: &TelaTheme) -> Div {
+    fn ready_body(&self, viewport_width: Pixels, theme: &TelaTheme) -> Div {
         let mode = self.session.mode();
         // 整篇一次渲染：不分页、不切页，一直按 PgDn / ↓ 就能读到结尾。
         // 行文本用缓存好的 SharedString，滚动时不会重新解析 HTML。
         let rows = &self.rendered_rows;
-        let mut list = v_flex()
+        let list = v_flex()
             .id("reader-scroll")
             .flex_1()
             .min_h_0()
@@ -1293,23 +1325,33 @@ impl ReaderView {
             .px_6()
             .py_4();
 
+        // 正文列宽：常态保持原来的 760px 单栏行宽 / 对照视图满宽；
+        // `Ctrl+R` 阅读模式下整列按窗口全宽的 70% 居中，两侧列表已由外壳收拢。
+        let mut column = if let Some(width) = self.content_width(viewport_width) {
+            v_flex().w(width).items_center()
+        } else {
+            v_flex().w_full().items_center()
+        };
+
         if rows.is_empty() {
-            list = list.child(
+            column = column.child(
                 div()
                     .text_sm()
                     .text_color(hsla(theme.colors.muted))
                     .child("这篇文章没有可显示的段落。"),
             );
         } else {
-            list = list.child(self.column_header(mode, theme));
+            column = column.child(self.column_header(mode, theme));
             for row in rows {
-                list = list.child(self.row_block(row, mode, theme));
+                column = column.child(self.row_block(row, mode, theme));
             }
             // 结尾标记：给读者一个明确的“读完了”信号，避免以为还有内容没加载。
-            list = list.child(
+            column = column.child(
                 div()
                     .w_full()
-                    .max_w(px(READING_MAX_WIDTH))
+                    .when(!self.reading_mode, |element| {
+                        element.max_w(px(READING_MAX_WIDTH))
+                    })
                     .pt_8()
                     .pb_4()
                     .text_xs()
@@ -1318,7 +1360,7 @@ impl ReaderView {
                     .child("— 全文完 —"),
             );
         }
-        v_flex().flex_1().min_h_0().child(list)
+        v_flex().flex_1().min_h_0().child(list.child(column))
     }
 
     /// 顶部只出现一次的列标题（原文 / 译文）。
@@ -1358,14 +1400,18 @@ impl ReaderView {
                 .child(div().flex_1().min_w_0().pl_6().child(label(translated))),
             ViewMode::Original => v_flex()
                 .w_full()
-                .max_w(px(READING_MAX_WIDTH))
+                .when(!self.reading_mode, |element| {
+                    element.max_w(px(READING_MAX_WIDTH))
+                })
                 .pb_2()
                 .border_b_1()
                 .border_color(divider)
                 .child(label(original)),
             ViewMode::Translation => v_flex()
                 .w_full()
-                .max_w(px(READING_MAX_WIDTH))
+                .when(!self.reading_mode, |element| {
+                    element.max_w(px(READING_MAX_WIDTH))
+                })
                 .pb_2()
                 .border_b_1()
                 .border_color(divider)
@@ -1393,12 +1439,16 @@ impl ReaderView {
         match mode {
             ViewMode::Original => v_flex()
                 .w_full()
-                .max_w(px(READING_MAX_WIDTH))
+                .when(!self.reading_mode, |element| {
+                    element.max_w(px(READING_MAX_WIDTH))
+                })
                 .py_3()
                 .child(original),
             ViewMode::Translation => v_flex()
                 .w_full()
-                .max_w(px(READING_MAX_WIDTH))
+                .when(!self.reading_mode, |element| {
+                    element.max_w(px(READING_MAX_WIDTH))
+                })
                 .py_3()
                 .child(translation),
             // 对照：块级对齐 + 原文/译文之间一道竖线；不再给每段加标签或横线。
@@ -1754,7 +1804,7 @@ impl Render for ReaderView {
         // ↑/↓ 的滚动步长跟随正文字号与行高，换主题/放大字体时保持一致。
         self.line_height = px(theme.typography.body_size * theme.typography.line_height);
         let header = self.header(cx);
-        let body = self.body(cx);
+        let body = self.body(window.viewport_size().width, cx);
         let recommend_dialog = self.recommend_dialog_layer(cx);
         v_flex()
             .id("reader-root")
@@ -1767,10 +1817,15 @@ impl Render for ReaderView {
             .track_focus(&self.focus)
             .focusable()
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                // `Ctrl/Alt/Cmd` 组合交给外壳（例如 `Ctrl+R` 切换阅读模式）；
+                // 阅读面板不能把 `Ctrl+R` 当成 `r` 重试，否则会与阅读模式打架。
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control || modifiers.alt || modifiers.platform {
+                    return;
+                }
                 // `Shift+R` 交给上层从来源刷新（收藏网页重新抓取、文章重新同步）；
                 // 单独的 `r` 仍然是本地缓存上的重试。
-                if event.keystroke.key.eq_ignore_ascii_case("r") && event.keystroke.modifiers.shift
-                {
+                if event.keystroke.key.eq_ignore_ascii_case("r") && modifiers.shift {
                     if !this.input_locked && this.recommend_dialog.is_none() {
                         cx.emit(ReaderEvent::RefreshRequested);
                     }
@@ -1790,6 +1845,11 @@ impl Render for ReaderView {
 }
 
 impl EventEmitter<ReaderEvent> for ReaderView {}
+
+/// 阅读模式下的正文列宽：窗口全宽的 70%（需求见 issue #10）。
+fn reading_mode_content_width(viewport_width: Pixels) -> Pixels {
+    px(viewport_width.as_f32() * READING_MODE_WIDTH_RATIO)
+}
 
 /// 一次 PageUp/PageDown 的滚动距离：视口高度减去少量重叠，避免行被切断。
 fn page_step(viewport: Pixels) -> Pixels {
@@ -1948,5 +2008,18 @@ fn language_label(code: &str) -> &str {
         "fr" | "fr-FR" | "fr-fr" => "Français",
         "ja" | "ja-JP" | "ja-jp" => "日本語",
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod reading_mode_width_tests {
+    use gpui_kit::px;
+
+    use super::reading_mode_content_width;
+
+    #[test]
+    fn reading_mode_content_width_is_seventy_percent_of_the_viewport() {
+        assert_eq!(reading_mode_content_width(px(1280.)), px(896.));
+        assert_eq!(reading_mode_content_width(px(1000.)), px(700.));
     }
 }

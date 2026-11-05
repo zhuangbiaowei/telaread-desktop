@@ -230,7 +230,7 @@ default; the `TELA_CLIENT_ID` environment variable can still override it.
 ### Keyboard shortcuts and mouse
 
 - Global: `j` / `k` next / previous article; `Shift+J` / `Shift+K` next / previous blog; `Shift+B` bookmark a URL (opens the "Bookmark web page" modal); `Shift+R` refresh the current content (re-fetch a bookmark, re-sync an article; a web update then reaches the local cache).
-- Reading: `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry (read the local cache), `Shift+R` refresh from the source.
+- Reading: `Ctrl+R` toggle reading mode (collapse the subscription and article lists; the article column becomes 70% of the window width and stays centred); `o` original, `c` compare, `t` translation, `↑` / `↓` scroll line by line, `PgUp` / `PgDn` scroll by viewport (one continuous article, no page switching), `r` retry (read the local cache), `Shift+R` refresh from the source.
 - Mouse: click a subscription/article to switch, scroll wheel to scroll, body text selectable; the "Theme" entry at the bottom of the sidebar opens the theme picker.
 
 ### Demo mode
